@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { AppState } from 'react-native'
 import TrackPlayer, {
   State as TrackPlayerState,
   usePlaybackState,
@@ -63,6 +64,24 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       }
     }
   }, [playbackState.state])
+
+  // Resume playback when returning to the foreground (native only).
+  // Some platforms pause the player when the app is backgrounded; if the user
+  // intended it to keep playing, nudge it back into the playing state.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active' || !isPlayingRef.current) return
+      TrackPlayer.getPlaybackState()
+        .then((playback) => {
+          if (playback.state === TrackPlayerState.Paused) {
+            return TrackPlayer.play()
+          }
+        })
+        .catch(() => {})
+    })
+
+    return () => subscription.remove()
+  }, [])
 
   // Initialize TrackPlayer once
   useEffect(() => {

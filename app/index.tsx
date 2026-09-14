@@ -5,6 +5,7 @@ import { useAudioPlayer } from '../src/hooks/useAudioPlayer'
 import { useStreamStatus } from '../src/hooks/useStreamStatus'
 import { useSubstations } from '../src/hooks/useSubstations'
 import { useChat } from '../src/hooks/useChat'
+import { useWakeLock } from '../src/hooks/useWakeLock'
 import { Player } from '../src/components/Player'
 import { VolumeSlider } from '../src/components/VolumeSlider'
 import { SubstationSelector } from '../src/components/SubstationSelector'
@@ -25,6 +26,8 @@ export default function HomeScreen() {
 
   const [searchOpen, setSearchOpen] = useState(false)
   const [chatVisible, setChatVisible] = useState(false)
+
+  useWakeLock(state === 'playing' || state === 'buffering' || state === 'loading')
 
   const isLive = status.type === 'live' || showLiveLabel
 

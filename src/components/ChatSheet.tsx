@@ -1,14 +1,65 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  View, Text, TextInput, TouchableOpacity, FlatList, Modal,
+  View, Text, TextInput, TouchableOpacity, FlatList, Modal, Image, ScrollView,
   StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator,
 } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
+import * as ImagePicker from 'expo-image-picker'
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator'
 import { storage, STORAGE_KEYS } from '../hooks/useStorage'
 import type { ChatMessageDTO } from '../hooks/useChat'
 
 const MAX_TEXT_LENGTH = 200
+const MAX_IMAGES = 5
+const MAX_IMAGE_SIDE = 600
+const MAX_IMAGE_BYTES = 200_000
 const NICKNAME_REGEX = /^[\p{L}\p{N} _-]+$/u
+
+interface SelectedImage {
+  uri: string
+  name: string
+}
+
+/** Prefix relative server paths with the API base; keep absolute URLs as-is. */
+function resolveImageUrl(path: string, apiBase: string): string {
+  return path.startsWith('http') ? path : `${apiBase}${path}`
+}
+
+/** Resize (max side 600px) + JPEG-compress an asset, targeting ≤200KB. */
+async function compressImage(asset: ImagePicker.ImagePickerAsset): Promise<SelectedImage> {
+  const maxSide = Math.max(asset.width, asset.height)
+  const scale = maxSide > MAX_IMAGE_SIDE ? MAX_IMAGE_SIDE / maxSide : 1
+  const targetWidth = Math.max(1, Math.round(asset.width * scale))
+  const targetHeight = Math.max(1, Math.round(asset.height * scale))
+  const actions =
+    maxSide > MAX_IMAGE_SIDE
+      ? [{ resize: { width: targetWidth, height: targetHeight } }]
+      : []
+
+  let compress = 0.7
+  let result = await manipulateAsync(asset.uri, actions, {
+    compress,
+    format: SaveFormat.JPEG,
+    base64: true,
+  })
+
+  while (
+    result.base64 &&
+    result.base64.length * 0.75 > MAX_IMAGE_BYTES &&
+    compress > 0.3
+  ) {
+    compress = Math.max(0.3, compress - 0.2)
+    result = await manipulateAsync(asset.uri, actions, {
+      compress,
+      format: SaveFormat.JPEG,
+      base64: true,
+    })
+  }
+
+  const originalName = asset.fileName || `image-${Date.now()}`
+  const name = originalName.replace(/\.[^.]+$/, '.jpg')
+  return { uri: result.uri, name }
+}
 
 interface ChatSheetProps {
   isOpen: boolean
@@ -22,6 +73,8 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
   const [nicknameError, setNicknameError] = useState<string | null>(null)
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
+  const [processing, setProcessing] = useState(false)
+  const [selectedImages, setSelectedImages] = useState<SelectedImage[]>([])
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const flatListRef = useRef<FlatList>(null)
   const API_BASE = process.env.EXPO_PUBLIC_API_URL || ''
@@ -47,42 +100,121 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
     setNickname(value)
   }, [])
 
-  const isSendDisabled = sending || nickname.trim().length < 2 || !text.trim()
+  const isSendDisabled =
+    sending ||
+    processing ||
+    nickname.trim().length < 2 ||
+    (!text.trim() && selectedImages.length === 0)
+
+  const handlePickImages = useCallback(async () => {
+    const available = MAX_IMAGES - selectedImages.length
+    if (available <= 0 || sending || processing) return
+
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync()
+      if (!permission.granted) {
+        setStatusMessage({ type: 'error', message: 'Photo library access is required' })
+        return
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsMultipleSelection: true,
+        selectionLimit: available,
+        quality: 1,
+      })
+
+      if (result.canceled || result.assets.length === 0) return
+
+      setStatusMessage(null)
+      setProcessing(true)
+
+      const next: SelectedImage[] = []
+      for (const asset of result.assets.slice(0, available)) {
+        next.push(await compressImage(asset))
+      }
+      setSelectedImages((prev) => [...prev, ...next].slice(0, MAX_IMAGES))
+    } catch {
+      setStatusMessage({ type: 'error', message: 'Failed to process images' })
+    } finally {
+      setProcessing(false)
+    }
+  }, [selectedImages.length, sending, processing])
+
+  const handleRemoveImage = useCallback((index: number) => {
+    setSelectedImages((prev) => prev.filter((_, i) => i !== index))
+  }, [])
 
   const handleSubmit = useCallback(async () => {
     if (isSendDisabled) return
     const trimmedNickname = nickname.trim()
     const trimmedText = text.trim()
-    if (!trimmedText) return
+    const hasText = !!trimmedText
+    const hasImages = selectedImages.length > 0
+    if (!hasText && !hasImages) return
 
     await storage.setItem(STORAGE_KEYS.CHAT_NICKNAME, trimmedNickname)
     setStatusMessage(null)
     setSending(true)
 
     try {
-      const res = await fetch(`${API_BASE}/api/v1/chat/send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nickname: trimmedNickname,
-          text: trimmedText,
-          substationSlug: substationSlug || undefined,
-        }),
-      })
-      const json = await res.json()
-      if (!res.ok || !json.success) {
-        setStatusMessage({ type: 'error', message: json.error || 'Send error' })
-        return
+      if (hasImages) {
+        const formData = new FormData()
+        formData.append('nickname', trimmedNickname)
+        if (hasText) formData.append('text', trimmedText)
+        if (substationSlug) formData.append('substationSlug', substationSlug)
+        selectedImages.forEach((img) => {
+          formData.append('files', {
+            uri: img.uri,
+            name: img.name,
+            type: 'image/jpeg',
+          } as unknown as Blob)
+        })
+
+        const res = await fetch(`${API_BASE}/api/v1/chat/send-with-images`, {
+          method: 'POST',
+          body: formData,
+        })
+        const json = await res.json().catch(() => ({ success: false, error: 'Send error' }))
+        if (!res.ok || !json.success) {
+          setStatusMessage({
+            type: 'error',
+            message: res.status === 403 ? 'Chat is currently unavailable' : json.error || 'Send error',
+          })
+          return
+        }
+        setSelectedImages([])
+        setText('')
+        setStatusMessage({ type: 'success', message: 'Sent!' })
+        setTimeout(() => setStatusMessage(null), 2000)
+      } else {
+        const res = await fetch(`${API_BASE}/api/v1/chat/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nickname: trimmedNickname,
+            text: trimmedText,
+            substationSlug: substationSlug || undefined,
+          }),
+        })
+        const json = await res.json()
+        if (!res.ok || !json.success) {
+          setStatusMessage({
+            type: 'error',
+            message: res.status === 403 ? 'Chat is currently unavailable' : json.error || 'Send error',
+          })
+          return
+        }
+        setText('')
+        setStatusMessage({ type: 'success', message: 'Sent!' })
+        setTimeout(() => setStatusMessage(null), 2000)
       }
-      setText('')
-      setStatusMessage({ type: 'success', message: 'Sent!' })
-      setTimeout(() => setStatusMessage(null), 2000)
     } catch {
       setStatusMessage({ type: 'error', message: 'Network error. Try again.' })
     } finally {
       setSending(false)
     }
-  }, [nickname, text, substationSlug, sending, isSendDisabled, API_BASE])
+  }, [nickname, text, substationSlug, sending, isSendDisabled, API_BASE, selectedImages])
 
   const formatTime = (isoString: string): string => {
     try {
@@ -93,6 +225,7 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
 
   const renderMessage = useCallback(({ item }: { item: ChatMessageDTO }) => {
     const isOwn = item.nickname === nickname.trim()
+    const images = item.images || []
     return (
       <View style={[styles.message, isOwn && styles.messageOwn]}>
         <View style={styles.messageMeta}>
@@ -100,11 +233,25 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
           <Text style={styles.messageTime}>{formatTime(item.timestamp)}</Text>
         </View>
         <View style={[styles.messageBubble, isOwn && styles.messageBubbleOwn]}>
-          <Text style={styles.messageText}>{item.text}</Text>
+          {images.length > 0 && (
+            <View style={styles.messageImages}>
+              {images.map((path, i) => (
+                <Image
+                  key={`${item.id}-img-${i}`}
+                  source={{ uri: resolveImageUrl(path, API_BASE) }}
+                  style={styles.messageImage}
+                  resizeMode="cover"
+                />
+              ))}
+            </View>
+          )}
+          {item.text ? <Text style={styles.messageText}>{item.text}</Text> : null}
         </View>
       </View>
     )
-  }, [nickname])
+  }, [nickname, API_BASE])
+
+  const imagesDisabled = selectedImages.length >= MAX_IMAGES || sending || processing
 
   return (
     <Modal visible={isOpen} transparent animationType="slide" onRequestClose={onClose}>
@@ -159,6 +306,17 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
                 />
                 <Text style={styles.charCounter}>{text.length}/{MAX_TEXT_LENGTH}</Text>
                 <TouchableOpacity
+                  onPress={handlePickImages}
+                  disabled={imagesDisabled}
+                  style={[styles.imageBtn, imagesDisabled && { opacity: 0.5 }]}
+                >
+                  {processing ? (
+                    <ActivityIndicator size="small" color="#ff6b35" />
+                  ) : (
+                    <Ionicons name="image-outline" size={20} color="#ff6b35" />
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
                   onPress={handleSubmit}
                   disabled={isSendDisabled}
                   style={[styles.sendBtn, isSendDisabled && { opacity: 0.5 }]}
@@ -166,6 +324,24 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
                   {sending ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="send" size={18} color="#fff" />}
                 </TouchableOpacity>
               </View>
+
+              {selectedImages.length > 0 && (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.previewStrip}
+                  contentContainerStyle={styles.previewStripContent}
+                >
+                  {selectedImages.map((img, i) => (
+                    <View key={`${img.uri}-${i}`} style={styles.previewItem}>
+                      <Image source={{ uri: img.uri }} style={styles.previewImage} />
+                      <TouchableOpacity onPress={() => handleRemoveImage(i)} style={styles.previewRemove}>
+                        <Ionicons name="close" size={12} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </ScrollView>
+              )}
 
               {statusMessage && (
                 <Text style={[styles.statusMsg, statusMessage.type === 'error' ? { color: '#ff4444' } : { color: '#2ECC71' }]}>
@@ -195,6 +371,8 @@ const styles = StyleSheet.create({
   messageBubble: { backgroundColor: '#2a2a2a', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, maxWidth: '85%' },
   messageBubbleOwn: { backgroundColor: '#ff6b35' },
   messageText: { color: '#fff', fontSize: 14 },
+  messageImages: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 4 },
+  messageImage: { width: 120, height: 120, borderRadius: 8, backgroundColor: '#111' },
   emptyState: { paddingVertical: 40, alignItems: 'center' },
   emptyText: { color: '#666', fontSize: 14 },
   inputArea: { paddingHorizontal: 16, paddingVertical: 12, borderTopWidth: 1, borderTopColor: '#222' },
@@ -204,6 +382,12 @@ const styles = StyleSheet.create({
   inputRow: { flexDirection: 'row', alignItems: 'flex-end' },
   textInput: { flex: 1, backgroundColor: '#222', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, color: '#fff', fontSize: 14, maxHeight: 80 },
   charCounter: { color: '#666', fontSize: 11, marginHorizontal: 8, marginBottom: 10 },
+  imageBtn: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', marginBottom: 2, marginRight: 4 },
   sendBtn: { backgroundColor: '#ff6b35', borderRadius: 20, width: 36, height: 36, alignItems: 'center', justifyContent: 'center', marginBottom: 2 },
+  previewStrip: { marginTop: 8, maxHeight: 72 },
+  previewStripContent: { gap: 8 },
+  previewItem: { width: 64, height: 64, borderRadius: 8, overflow: 'hidden' },
+  previewImage: { width: '100%', height: '100%' },
+  previewRemove: { position: 'absolute', top: 2, right: 2, width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center' },
   statusMsg: { fontSize: 12, marginTop: 6, textAlign: 'center' },
 })
