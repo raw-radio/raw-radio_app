@@ -62,7 +62,7 @@ export default function HomeScreen() {
           status={status}
           onToggle={handlePlay}
           isLive={isLive}
-          liveLabel={liveLabelText}
+          liveLabel={liveLabelText ?? undefined}
         />
 
         <View style={styles.bottomControls}>
