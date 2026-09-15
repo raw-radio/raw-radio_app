@@ -95,7 +95,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     if (initializedRef.current) return
     initializedRef.current = true
 
-    const setupPromise = TrackPlayer.setupPlayer({ waitForBuffer: true })
+    const setupPromise = TrackPlayer.setupPlayer()
       .then(async () => {
         const savedVol = await storage.getItem(STORAGE_KEYS.VOLUME)
         const savedMuted = await storage.getItem(STORAGE_KEYS.MUTED)
