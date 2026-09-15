@@ -25,6 +25,28 @@ function resolveImageUrl(path: string, apiBase: string): string {
   return path.startsWith('http') ? path : `${apiBase}${path}`
 }
 
+type NativeFormDataFile = { uri: string; name: string; type: string }
+
+/**
+ * Build the value appended to FormData for a single image.
+ *
+ * On web, React Native's `{ uri, name, type }` object is stringified to
+ * `"[object Object]"` — the file must be a real Blob/File. On native,
+ * `{ uri, name, type }` is the format React Native's FormData understands.
+ */
+async function fileFromUri(
+  uri: string,
+  name: string,
+  type: string,
+): Promise<File | NativeFormDataFile> {
+  if (Platform.OS === 'web') {
+    const response = await fetch(uri)
+    const blob = await response.blob()
+    return new File([blob], name, { type })
+  }
+  return { uri, name, type }
+}
+
 /** Resize (max side 600px) + JPEG-compress an asset, targeting ≤200KB. */
 async function compressImage(asset: ImagePicker.ImagePickerAsset): Promise<SelectedImage> {
   const maxSide = Math.max(asset.width, asset.height)
@@ -163,12 +185,13 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
         formData.append('nickname', trimmedNickname)
         if (hasText) formData.append('text', trimmedText)
         if (substationSlug) formData.append('substationSlug', substationSlug)
-        selectedImages.forEach((img) => {
-          formData.append('files', {
-            uri: img.uri,
-            name: img.name,
-            type: 'image/jpeg',
-          } as unknown as Blob)
+        const files = await Promise.all(
+          selectedImages.map((img) => fileFromUri(img.uri, img.name, 'image/jpeg')),
+        )
+        files.forEach((file) => {
+          // Web returns a real File/Blob; native RN FormData needs the plain
+          // `{ uri, name, type }` object (hence the cast for the DOM typing).
+          formData.append('files', file as unknown as Blob)
         })
 
         const res = await fetch(`${API_BASE}/api/v1/chat/send-with-images`, {

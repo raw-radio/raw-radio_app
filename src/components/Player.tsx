@@ -19,10 +19,6 @@ export function Player({ state, status, onToggle, isLive = false, liveLabel }: P
   return (
     <View style={styles.hero}>
       <View style={styles.playBtnWrap}>
-        {isPlaying && <View style={[styles.pulseRing, { opacity: 0 }]} />}
-        {isPlaying && <View style={[styles.pulseRing, { opacity: 0 }]} />}
-        {isPlaying && <View style={[styles.pulseRing, { opacity: 0 }]} />}
-
         <TouchableOpacity
           style={[styles.playBtn, isError && styles.playBtnOffline]}
           onPress={onToggle}
@@ -74,14 +70,6 @@ const styles = StyleSheet.create({
     height: 100,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  pulseRing: {
-    position: 'absolute',
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    borderWidth: 2,
-    borderColor: 'rgba(255, 107, 53, 0.3)',
   },
   playBtn: {
     width: 80,

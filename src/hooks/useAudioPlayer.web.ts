@@ -328,7 +328,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       setMuted(false)
       prevVolumeRef.current = clamped
     }
-    storage.setItem(STORAGE_KEYS.VOLUME, String(clamped))
+    // Persistence is debounced by VolumeSlider (owns the high-frequency events).
   }, [])
 
   const toggleMute = useCallback(() => {

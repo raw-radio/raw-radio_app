@@ -32,6 +32,13 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   const modeRef = useRef<PlayerMode>('radio')
   const initializedRef = useRef(false)
   const prevVolumeRef = useRef(1)
+  // Resolves once TrackPlayer.setupPlayer() has completed.
+  const setupPromiseRef = useRef<Promise<void> | null>(null)
+  const readyRef = useRef(false)
+  // Set only when the user explicitly starts playback (play/toggle).
+  const userInitiatedRef = useRef(false)
+  // A play request that arrived before setup completed.
+  const pendingPlayRef = useRef(false)
 
   const buildStreamUrl = useCallback((slug: string) => {
     const base = process.env.EXPO_PUBLIC_API_URL || ''
@@ -88,7 +95,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     if (initializedRef.current) return
     initializedRef.current = true
 
-    TrackPlayer.setupPlayer({ waitForBuffer: true })
+    const setupPromise = TrackPlayer.setupPlayer({ waitForBuffer: true })
       .then(async () => {
         const savedVol = await storage.getItem(STORAGE_KEYS.VOLUME)
         const savedMuted = await storage.getItem(STORAGE_KEYS.MUTED)
@@ -105,15 +112,28 @@ export function useAudioPlayer(currentSlug: string | undefined) {
           await TrackPlayer.setVolume(0)
         }
       })
+      .then(() => {
+        readyRef.current = true
+        // Flush a play request that raced with setup (see slug-change effect).
+        if (pendingPlayRef.current && userInitiatedRef.current) {
+          pendingPlayRef.current = false
+          void tryPlay(buildStreamUrl(savedSlugRef.current))
+        }
+      })
       .catch(() => {})
+    setupPromiseRef.current = setupPromise
 
     return () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const tryPlay = useCallback(async (url: string) => {
     try {
+      // Never touch TrackPlayer before setupPlayer() resolves.
+      if (setupPromiseRef.current) await setupPromiseRef.current
+
       currentUrlRef.current = url
       isPlayingRef.current = true
       setState('loading')
@@ -135,7 +155,9 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   const play = useCallback(async () => {
     retryCountRef.current = 0
     setError(null)
+    userInitiatedRef.current = true
     const slug = currentSlug || 'main'
+    savedSlugRef.current = slug
     const url = buildStreamUrl(slug)
     await tryPlay(url)
   }, [currentSlug, buildStreamUrl, tryPlay])
@@ -213,7 +235,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       setMuted(false)
       prevVolumeRef.current = clamped
     }
-    storage.setItem(STORAGE_KEYS.VOLUME, String(clamped))
+    // Persistence is debounced by VolumeSlider (owns the high-frequency events).
   }, [])
 
   const toggleMute = useCallback(async () => {
@@ -251,7 +273,11 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     return () => clearTimeout(timer)
   }, [state])
 
-  // Re-init audio when slug changes
+  // React to slug changes.
+  // - On mount (or whenever the user hasn't started playback) do NOT auto-start:
+  //   just remember the URL so the next user-initiated play uses the new slug.
+  // - While playing, switch to the new substation's stream.
+  // - If setup hasn't finished yet, defer the switch via pendingPlayRef.
   useEffect(() => {
     if (modeRef.current === 'track') return
     retryCountRef.current = 0
@@ -259,9 +285,19 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       clearTimeout(retryTimerRef.current)
       retryTimerRef.current = null
     }
-    const url = buildStreamUrl(currentSlug || 'main')
-    tryPlay(url)
-  }, [currentSlug])
+    const slug = currentSlug || 'main'
+    const url = buildStreamUrl(slug)
+    currentUrlRef.current = url
+    savedSlugRef.current = slug
+
+    if (!userInitiatedRef.current || !isPlayingRef.current) return
+
+    if (readyRef.current) {
+      tryPlay(url)
+    } else {
+      pendingPlayRef.current = true
+    }
+  }, [currentSlug, buildStreamUrl, tryPlay])
 
   return {
     play,

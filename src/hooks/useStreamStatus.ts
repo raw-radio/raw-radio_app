@@ -15,6 +15,18 @@ const INITIAL_STATUS: StreamStatus = {
   duration: null,
 }
 
+/**
+ * NOTE: `substationId` in these WS payloads is NOT a database UUID — the server
+ * sets it to the substation slug (see SubstationManager.emitNowPlaying:
+ * `substationId: slug`). So comparing it against `activeSlug` is correct for the
+ * server's actual payloads. `substationSlug` is preferred when present.
+ *
+ * Intentional limitation: events that omit BOTH `substationSlug` and
+ * `substationId` (e.g. legacy `stream:dj-change` or broadcast.service emitters)
+ * are dropped whenever a real slug is active. That is acceptable because the
+ * server always includes the slug for per-substation events; those legacy
+ * global events are only relevant to `main`.
+ */
 function isForActiveSubstation(
   data: { substationId?: string | null; substationSlug?: string | null } | null | undefined,
   activeSlug?: string | null,

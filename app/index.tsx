@@ -47,7 +47,11 @@ export default function HomeScreen() {
         <View style={styles.topBar}>
           <View style={[styles.connectionDot, { backgroundColor: connected ? '#2ECC71' : '#ff4444' }]} />
           <View style={styles.topBarActions}>
-            <TouchableOpacity onPress={() => setSearchOpen(true)} style={styles.topBtn}>
+            <TouchableOpacity
+              onPress={() => setSearchOpen(true)}
+              style={styles.topBtn}
+              accessibilityLabel="Search tracks"
+            >
               <Ionicons name="search" size={20} color="#aaa" />
             </TouchableOpacity>
             <ShareButton slug={currentSlug || 'main'} />
@@ -70,7 +74,11 @@ export default function HomeScreen() {
 
         <View style={styles.bottomControls}>
           <VolumeSlider volume={volume} muted={muted} onChange={setVolume} onToggleMute={toggleMute} />
-          <TouchableOpacity onPress={() => setChatVisible(!chatVisible)} style={styles.chatToggle}>
+          <TouchableOpacity
+            onPress={() => setChatVisible(!chatVisible)}
+            style={styles.chatToggle}
+            accessibilityLabel="Toggle chat"
+          >
             <Ionicons name="chatbubble-ellipses" size={22} color={chatVisible ? '#ff6b35' : '#aaa'} />
           </TouchableOpacity>
         </View>
