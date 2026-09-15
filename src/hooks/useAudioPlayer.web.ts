@@ -81,7 +81,6 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     // Apply the latest volume without depending on React state
     audio.volume = volumeRef.current
     audio.preload = 'none'
-    audio.crossOrigin = 'anonymous'
 
     audio.addEventListener('loadstart', () => {
       setState('loading')
