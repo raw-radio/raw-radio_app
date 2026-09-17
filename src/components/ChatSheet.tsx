@@ -1,8 +1,16 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  View, Text, TextInput, TouchableOpacity, FlatList, Modal, Image, ScrollView,
-  StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator,
+  View, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, Pressable, FlatList, Modal, Image,
+  ScrollView, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, useWindowDimensions,
 } from 'react-native'
+import Animated, {
+  Easing as ReanimatedEasing,
+  interpolate,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated'
 import { Ionicons } from '@expo/vector-icons'
 import * as ImagePicker from 'expo-image-picker'
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator'
@@ -14,6 +22,14 @@ const MAX_IMAGES = 5
 const MAX_IMAGE_SIDE = 600
 const MAX_IMAGE_BYTES = 200_000
 const NICKNAME_REGEX = /^[\p{L}\p{N} _-]+$/u
+
+/** Chat open/close animation timing. */
+const SHEET_OPEN_MS = 260
+const SHEET_CLOSE_MS = 200
+/** Backdrop dims to 50% black, like `.overlay { background: rgba(0,0,0,0.5) }`. */
+const BACKDROP_MAX_OPACITY = 0.5
+/** Bottom sheet reaches at most 80% of the window height (web drawer parity). */
+const SHEET_MAX_HEIGHT_RATIO = 0.8
 
 interface SelectedImage {
   uri: string
@@ -100,6 +116,58 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const flatListRef = useRef<FlatList>(null)
   const API_BASE = process.env.EXPO_PUBLIC_API_URL || ''
+
+  // One shared progress value (0 = hidden, 1 = fully open) drives both layers:
+  // the backdrop only fades, the sheet slides up + fades. `mounted` keeps the
+  // Modal around while the closing animation runs.
+  const progress = useSharedValue(0)
+  const [mounted, setMounted] = useState(isOpen)
+  // Reactive window height: rotation / resize recomputes the 80% bound and the
+  // closing offset instead of freezing a value captured at first render.
+  const { height: windowHeight } = useWindowDimensions()
+  const sheetMaxHeight = windowHeight * SHEET_MAX_HEIGHT_RATIO
+
+  useEffect(() => {
+    if (isOpen) {
+      setMounted(true)
+      progress.value = withTiming(1, {
+        duration: SHEET_OPEN_MS,
+        easing: ReanimatedEasing.out(ReanimatedEasing.cubic),
+      })
+      return
+    }
+
+    // Closed from the outside (e.g. chat disabled in admin) — hide immediately.
+    progress.value = 0
+    setMounted(false)
+  }, [isOpen, progress])
+
+  const requestClose = useCallback(() => {
+    progress.value = withTiming(
+      0,
+      { duration: SHEET_CLOSE_MS, easing: ReanimatedEasing.in(ReanimatedEasing.cubic) },
+      (finished) => {
+        if (finished) {
+          runOnJS(onClose)()
+        }
+      },
+    )
+  }, [onClose, progress])
+
+  const backdropStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0, 1], [0, BACKDROP_MAX_OPACITY]),
+  }))
+
+  const sheetStyle = useAnimatedStyle(
+    () => ({
+      // Fade lags the slide slightly for the soft "fade-bottom" feel.
+      opacity: interpolate(progress.value, [0, 0.3, 1], [0, 0, 1]),
+      // The sheet never grows past `sheetMaxHeight`, so this offset is always
+      // enough to slide it fully off-screen when closing.
+      transform: [{ translateY: interpolate(progress.value, [0, 1], [sheetMaxHeight, 0]) }],
+    }),
+    [sheetMaxHeight],
+  )
 
   useEffect(() => {
     storage.getItem(STORAGE_KEYS.CHAT_NICKNAME).then((saved) => {
@@ -277,115 +345,149 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
   const imagesDisabled = selectedImages.length >= MAX_IMAGES || sending || processing
 
   return (
-    <Modal visible={isOpen} transparent animationType="slide" onRequestClose={onClose}>
-      <TouchableOpacity style={styles.overlay} activeOpacity={1} onPress={onClose}>
+    <Modal
+      visible={mounted}
+      transparent
+      animationType="none"
+      onRequestClose={requestClose}
+      statusBarTranslucent
+    >
+      <View style={styles.root}>
+        {/* Backdrop — fades in/out, never slides. */}
+        <Animated.View pointerEvents="none" style={[styles.backdrop, backdropStyle]} />
+        <Pressable
+          style={StyleSheet.absoluteFill}
+          onPress={requestClose}
+          accessibilityRole="button"
+          accessibilityLabel="Закрыть чат"
+        />
+
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={styles.drawer}
+          style={styles.drawerContainer}
+          pointerEvents="box-none"
         >
-          <TouchableOpacity activeOpacity={1} onPress={() => {}}>
-            <View style={styles.header}>
-              <Text style={styles.title}>💬 Chat</Text>
-              <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
-                <Ionicons name="close" size={20} color="#aaa" />
-              </TouchableOpacity>
-            </View>
-
-            <FlatList
-              ref={flatListRef}
-              data={messages}
-              keyExtractor={(item) => item.id}
-              renderItem={renderMessage}
-              style={styles.messagesList}
-              ListEmptyComponent={
-                <View style={styles.emptyState}>
-                  <Text style={styles.emptyText}>No messages yet. Be the first!</Text>
-                </View>
-              }
-            />
-
-            <View style={styles.inputArea}>
-              <TextInput
-                style={[styles.nicknameInput, nicknameError && styles.inputError]}
-                placeholder="Your name"
-                placeholderTextColor="#666"
-                value={nickname}
-                onChangeText={handleNicknameChange}
-                maxLength={30}
-                autoCorrect={false}
-              />
-              {nicknameError && <Text style={styles.fieldError}>{nicknameError}</Text>}
-
-              <View style={styles.inputRow}>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="Message..."
-                  placeholderTextColor="#666"
-                  value={text}
-                  onChangeText={setText}
-                  maxLength={MAX_TEXT_LENGTH}
-                  multiline
-                  editable={!sending}
-                />
-                <Text style={styles.charCounter}>{text.length}/{MAX_TEXT_LENGTH}</Text>
+          <TouchableWithoutFeedback onPress={() => {}}>
+            <Animated.View style={[styles.drawer, { maxHeight: sheetMaxHeight }, sheetStyle]}>
+              <View style={styles.header}>
+                <Text style={styles.title}>💬 Chat</Text>
                 <TouchableOpacity
-                  onPress={handlePickImages}
-                  disabled={imagesDisabled}
-                  style={[styles.imageBtn, imagesDisabled && { opacity: 0.5 }]}
+                  onPress={requestClose}
+                  style={styles.closeBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="Закрыть чат"
                 >
-                  {processing ? (
-                    <ActivityIndicator size="small" color="#ff6b35" />
-                  ) : (
-                    <Ionicons name="image-outline" size={20} color="#ff6b35" />
-                  )}
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={handleSubmit}
-                  disabled={isSendDisabled}
-                  style={[styles.sendBtn, isSendDisabled && { opacity: 0.5 }]}
-                >
-                  {sending ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="send" size={18} color="#fff" />}
+                  <Ionicons name="close" size={20} color="#aaa" />
                 </TouchableOpacity>
               </View>
 
-              {selectedImages.length > 0 && (
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.previewStrip}
-                  contentContainerStyle={styles.previewStripContent}
-                >
-                  {selectedImages.map((img, i) => (
-                    <View key={`${img.uri}-${i}`} style={styles.previewItem}>
-                      <Image source={{ uri: img.uri }} style={styles.previewImage} />
-                      <TouchableOpacity onPress={() => handleRemoveImage(i)} style={styles.previewRemove}>
-                        <Ionicons name="close" size={12} color="#fff" />
-                      </TouchableOpacity>
-                    </View>
-                  ))}
-                </ScrollView>
-              )}
+              <FlatList
+                ref={flatListRef}
+                data={messages}
+                keyExtractor={(item) => item.id}
+                renderItem={renderMessage}
+                style={[styles.messagesList, { maxHeight: sheetMaxHeight }]}
+                ListEmptyComponent={
+                  <View style={styles.emptyState}>
+                    <Text style={styles.emptyText}>No messages yet. Be the first!</Text>
+                  </View>
+                }
+              />
 
-              {statusMessage && (
-                <Text style={[styles.statusMsg, statusMessage.type === 'error' ? { color: '#ff4444' } : { color: '#2ECC71' }]}>
-                  {statusMessage.message}
-                </Text>
-              )}
-            </View>
-          </TouchableOpacity>
+              <View style={styles.inputArea}>
+                <TextInput
+                  style={[styles.nicknameInput, nicknameError && styles.inputError]}
+                  placeholder="Your name"
+                  placeholderTextColor="#666"
+                  value={nickname}
+                  onChangeText={handleNicknameChange}
+                  maxLength={30}
+                  autoCorrect={false}
+                />
+                {nicknameError && <Text style={styles.fieldError}>{nicknameError}</Text>}
+
+                <View style={styles.inputRow}>
+                  <TextInput
+                    style={styles.textInput}
+                    placeholder="Message..."
+                    placeholderTextColor="#666"
+                    value={text}
+                    onChangeText={setText}
+                    maxLength={MAX_TEXT_LENGTH}
+                    multiline
+                    editable={!sending}
+                  />
+                  <Text style={styles.charCounter}>{text.length}/{MAX_TEXT_LENGTH}</Text>
+                  <TouchableOpacity
+                    onPress={handlePickImages}
+                    disabled={imagesDisabled}
+                    style={[styles.imageBtn, imagesDisabled && { opacity: 0.5 }]}
+                  >
+                    {processing ? (
+                      <ActivityIndicator size="small" color="#ff6b35" />
+                    ) : (
+                      <Ionicons name="image-outline" size={20} color="#ff6b35" />
+                    )}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={handleSubmit}
+                    disabled={isSendDisabled}
+                    style={[styles.sendBtn, isSendDisabled && { opacity: 0.5 }]}
+                  >
+                    {sending ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="send" size={18} color="#fff" />}
+                  </TouchableOpacity>
+                </View>
+
+                {selectedImages.length > 0 && (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={styles.previewStrip}
+                    contentContainerStyle={styles.previewStripContent}
+                  >
+                    {selectedImages.map((img, i) => (
+                      <View key={`${img.uri}-${i}`} style={styles.previewItem}>
+                        <Image source={{ uri: img.uri }} style={styles.previewImage} />
+                        <TouchableOpacity onPress={() => handleRemoveImage(i)} style={styles.previewRemove}>
+                          <Ionicons name="close" size={12} color="#fff" />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </ScrollView>
+                )}
+
+                {statusMessage && (
+                  <Text style={[styles.statusMsg, statusMessage.type === 'error' ? { color: '#ff4444' } : { color: '#2ECC71' }]}>
+                    {statusMessage.message}
+                  </Text>
+                )}
+              </View>
+            </Animated.View>
+          </TouchableWithoutFeedback>
         </KeyboardAvoidingView>
-      </TouchableOpacity>
+      </View>
     </Modal>
   )
 }
 
 const styles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  drawer: { backgroundColor: '#1a1a1a', borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: '80%' },
+  root: { flex: 1, justifyContent: 'flex-end' },
+  backdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000',
+  },
+  drawerContainer: { flex: 1, justifyContent: 'flex-end' },
+  // Height bound is set inline from the live window size (80%); `flexShrink`
+  // lets the list shrink inside the sheet so long chats scroll internally.
+  drawer: { backgroundColor: '#1a1a1a', borderTopLeftRadius: 16, borderTopRightRadius: 16 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#222' },
   title: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
   closeBtn: { padding: 4 },
-  messagesList: { maxHeight: 300, paddingHorizontal: 16 },
+  messagesList: { flexShrink: 1, paddingHorizontal: 16 },
   message: { marginTop: 12 },
   messageOwn: { alignItems: 'flex-end' },
   messageMeta: { flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
