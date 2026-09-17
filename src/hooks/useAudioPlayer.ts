@@ -93,16 +93,23 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isPlayingRef = useRef(false)
+  // URL this instance last loaded (or, on mount, the one the previous session
+  // left loaded). The slug-change effect compares against it so a "change" that
+  // already points at the loaded stream does not tear the stream down and back
+  // up (re-tap of the current station, persisted slug resolving after mount).
   const currentUrlRef = useRef('')
   const savedSlugRef = useRef(currentSlug || 'main')
+  // Last slug this hook actually reacted to. Seeded with the initial slug so the
+  // mount itself is not a "change" — that is what keeps a cold start from
+  // auto-starting playback. (An earlier `userInitiatedRef` gate approximated this
+  // and, worse, silently dropped every station switch made after a relaunch.)
+  const prevSlugRef = useRef(currentSlug || 'main')
   const modeRef = useRef<PlayerMode>('radio')
   const initializedRef = useRef(false)
   const prevVolumeRef = useRef(1)
   // Resolves once TrackPlayer.setupPlayer() has completed.
   const setupPromiseRef = useRef<Promise<void> | null>(null)
   const readyRef = useRef(false)
-  // Set only when the user explicitly starts playback (play/toggle).
-  const userInitiatedRef = useRef(false)
   // A play request that arrived before setup completed.
   const pendingPlayRef = useRef(false)
   // Latest `playTrack`, so `play()` can restart the current on-demand track
@@ -228,6 +235,11 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     const subscriptions = [
       TrackPlayer.addEventListener(Event.RemotePause, () => {
         isPlayingRef.current = false
+        // Mirror the intent into the state the slug-change effect also consults
+        // (see `intendsToPlay`): the native transport is async, and a station
+        // switch issued in the same tick must not read the still-stale `Playing`
+        // and start audio the user just paused.
+        playbackStateRef.current = TrackPlayerState.Paused
         setState('paused')
       }),
       TrackPlayer.addEventListener(Event.RemotePlay, () => {
@@ -242,6 +254,8 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       }),
       TrackPlayer.addEventListener(Event.RemoteStop, () => {
         isPlayingRef.current = false
+        // Same synchronous mirror as RemotePause above.
+        playbackStateRef.current = TrackPlayerState.Stopped
         setState('paused')
       }),
     ]
@@ -287,10 +301,47 @@ export function useAudioPlayer(currentSlug: string | undefined) {
           await TrackPlayer.setVolume(0)
         }
       })
-      .then(() => {
+      .then(async () => {
         readyRef.current = true
+
+        // Seed "the app intends to play" from the player itself.
+        //
+        // This JS instance starts with no memory of a session that outlived it:
+        // with `AppKilledPlaybackBehavior.ContinuePlayback` the Android playback
+        // service keeps streaming after the app is swiped away, so on relaunch
+        // RNTP can be Playing while `isPlayingRef` is still false (and the
+        // `usePlaybackState()` subscription alone already makes the UI render
+        // "playing"). Without this seed a station switch was silently dropped
+        // (see the slug-change effect) and the stall watchdog / reconnect chain
+        // stayed disarmed for the whole session.
+        try {
+          const playback = await TrackPlayer.getPlaybackState()
+          if (
+            modeRef.current === 'radio' &&
+            (playback.state === TrackPlayerState.Playing ||
+              playback.state === TrackPlayerState.Buffering)
+          ) {
+            isPlayingRef.current = true
+            // Something is playing, so a queue provably exists — let the tray
+            // metadata update instead of leaving the notification on the
+            // fallback title published by the previous session.
+            hasQueueRef.current = true
+            // Record which stream is already loaded: the persisted station slug
+            // commonly resolves a few ms after the mount, and if it points at the
+            // stream that is already on air, re-loading it would be a pointless
+            // (and audible) teardown.
+            const active = await TrackPlayer.getActiveTrack()
+            if (active?.url) currentUrlRef.current = active.url
+          }
+        } catch {
+          // Best-effort: a failed state probe must not block setup.
+        }
+
         // Flush a play request that raced with setup (see slug-change effect).
-        if (pendingPlayRef.current && userInitiatedRef.current) {
+        // `pendingPlayRef` is only ever set after `intendsToPlay()` said yes, and
+        // `isPlayingRef` is checked again here so a pause issued while setup was
+        // still resolving cancels the deferred start.
+        if (pendingPlayRef.current && isPlayingRef.current) {
           pendingPlayRef.current = false
           void tryPlay(buildStreamUrl(savedSlugRef.current))
         }
@@ -390,7 +441,6 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   const play = useCallback(async () => {
     retryCountRef.current = 0
     setError(null)
-    userInitiatedRef.current = true
 
     // In on-demand mode `play` must restart the CURRENT track, not the radio
     // stream: `mode`/`currentTrack` — and the PlayerBar + tray metadata that
@@ -415,6 +465,12 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       retryTimerRef.current = null
     }
     isPlayingRef.current = false
+    // Mirror the intent synchronously into the state the slug-change effect also
+    // consults (see `intendsToPlay`): `TrackPlayer.pause()` and its
+    // PlaybackState event are async, and a station switch issued in the same tick
+    // must not read the still-stale `Playing` and auto-start audio the user just
+    // paused.
+    playbackStateRef.current = TrackPlayerState.Paused
     await TrackPlayer.pause()
     setState('paused')
   }, [])
@@ -445,9 +501,9 @@ export function useAudioPlayer(currentSlug: string | undefined) {
 
     setError(null)
     retryCountRef.current = 0
-    // Playback is user-initiated: after an on-demand track, switching substation
-    // must actually switch the stream (`userInitiatedRef` gates the slug effect).
-    userInitiatedRef.current = true
+    // After an on-demand track, switching substation must switch the stream back
+    // to radio — the slug-change effect handles that via `prevSlugRef` +
+    // `intendsToPlay` (`isPlayingRef` is set below, before any await).
     savedSlugRef.current = currentSlug || 'main'
     setCurrentTrack(track)
     setState('loading')
@@ -609,31 +665,74 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     return () => clearInterval(id)
   }, [])
 
-  // React to slug changes.
-  // - On mount (or whenever the user hasn't started playback) do NOT auto-start:
-  //   just remember the URL so the next user-initiated play uses the new slug.
-  // - While playing, switch to the new substation's stream.
-  // - If setup hasn't finished yet, defer the switch via pendingPlayRef.
+  /**
+   * Whether the app should be producing audio right now — the question the
+   * slug-change effect must answer before it may replace the current stream.
+   *
+   * `isPlayingRef` is the *intent* flag: `play()`/`pause()`, `playTrack()` and
+   * the OS media controls keep it current, and it is seeded from the real RNTP
+   * state on mount. The live RNTP state is accepted as a secondary signal on
+   * purpose — it is the source of truth, and it closes every window in which the
+   * JS-side flag is stale (a switch fired before the mount seed landed, a session
+   * that outlived the app, a state event that never reached a suspended JS
+   * thread).
+   *
+   * Widening the predicate this way cannot auto-start audio on a genuinely
+   * paused/idle player: Playing/Buffering/Loading mean audio is already being
+   * produced or requested by someone, so there is nothing to start. `pause()` and
+   * the RemotePause/RemoteStop handlers mirror the paused intent into
+   * `playbackStateRef` synchronously, so even a switch issued in the same tick as
+   * a pause is still treated as paused.
+   */
+  const intendsToPlay = useCallback(() => {
+    if (isPlayingRef.current) return true
+    const ps = playbackStateRef.current
+    return (
+      ps === TrackPlayerState.Playing ||
+      ps === TrackPlayerState.Buffering ||
+      ps === TrackPlayerState.Loading
+    )
+  }, [])
+
+  // React to slug changes (station switch).
+  // - The mount is NOT a change: `prevSlugRef` is seeded with the initial slug,
+  //   so a cold start never auto-starts playback.
+  // - A real change while the app intends to play switches the stream
+  //   unconditionally — the same shape the web hook has always used, and the only
+  //   shape that works when the switch is a hot one (no pause in between).
+  // - A real change while the player is intentionally paused/idle only records
+  //   the new URL, so the next `play()` starts the newly selected station.
+  // - If setup hasn't resolved yet, the switch is deferred via `pendingPlayRef`.
   useEffect(() => {
     if (modeRef.current === 'track') return
+
+    const slug = currentSlug || 'main'
+    const url = buildStreamUrl(slug)
+    // Remember the selection: a later `play()` / `stopTrack()` must use it.
+    savedSlugRef.current = slug
+
+    if (prevSlugRef.current === slug) return
+    prevSlugRef.current = slug
+
     retryCountRef.current = 0
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current)
       retryTimerRef.current = null
     }
-    const slug = currentSlug || 'main'
-    const url = buildStreamUrl(slug)
-    currentUrlRef.current = url
-    savedSlugRef.current = slug
 
-    if (!userInitiatedRef.current || !isPlayingRef.current) return
+    if (!intendsToPlay()) return
+
+    // This URL is already what we (or the session that outlived this JS instance)
+    // loaded — nothing to switch. Without this, a relaunch that resolves the
+    // persisted slug after the mount would re-load the very stream that is on air.
+    if (currentUrlRef.current === url) return
 
     if (readyRef.current) {
-      tryPlay(url)
+      void tryPlay(url)
     } else {
       pendingPlayRef.current = true
     }
-  }, [currentSlug, buildStreamUrl, tryPlay])
+  }, [currentSlug, buildStreamUrl, tryPlay, intendsToPlay])
 
   return {
     play,
