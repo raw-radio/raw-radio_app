@@ -36,8 +36,8 @@ const DOT_DISCONNECTED = '#d64838'
  * travels one direction per half-period, so a full breath is 2 × 1000ms = 2s,
  * matching the web keyframes (`0%/100% → 50% → 0%/100%`).
  */
-const DOT_PULSE_HALF_MS = 1000
-const DOT_PULSE_MIN_OPACITY = 0.3
+const DOT_PULSE_HALF_MS = 2000
+const DOT_PULSE_MIN_OPACITY = 0.2
 
 const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' })
 
