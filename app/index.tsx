@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react'
-import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { Linking, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
 import Animated, {
   cancelAnimation,
   Easing as ReanimatedEasing,
@@ -40,6 +40,18 @@ const DOT_PULSE_HALF_MS = 2000
 const DOT_PULSE_MIN_OPACITY = 0.2
 
 const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' })
+
+/**
+ * Android APK download — the stable GitHub "latest release" asset URL.
+ *
+ * The asset NAME (`raw-radio-universal.apk`) is load-bearing: the link resolves
+ * to whatever release is currently tagged `latest`, but the file inside it must
+ * keep this exact name. Renaming the artifact in a future release breaks this
+ * button. Only rendered on web (see `Platform.OS === 'web'` guard below) —
+ * users on Android/iOS already run the app.
+ */
+const ANDROID_APP_DOWNLOAD_URL =
+  'https://github.com/raw-radio/raw-radio_app/releases/latest/download/raw-radio-universal.apk'
 
 export default function HomeScreen() {
   const router = useRouter()
@@ -162,6 +174,29 @@ export default function HomeScreen() {
     [playTrack],
   )
 
+  /**
+   * Opens the Android APK download. Mirrors the `openExternal` pattern from
+   * `app/copyright.tsx`: on web go through `window.open` so the download starts
+   * in a new tab with `noopener,noreferrer`; `Linking.openURL` (which maps to
+   * `window.open` on react-native-web) covers everything else. Never throws —
+   * a blocked popup must not take the player down.
+   */
+  const handleDownloadAndroidApp = useCallback(() => {
+    try {
+      if (Platform.OS === 'web') {
+        if (typeof window === 'undefined') return
+        window.open(ANDROID_APP_DOWNLOAD_URL, '_blank', 'noopener,noreferrer')
+        return
+      }
+
+      void Linking.openURL(ANDROID_APP_DOWNLOAD_URL).catch(() => {
+        // No handler for the URL — nothing else we can do.
+      })
+    } catch {
+      // Popup blocked / URL handler missing — ignore.
+    }
+  }, [])
+
   return (
     <View style={styles.container}>
       {/* Header: logo + connection dot on the left, actions on the right */}
@@ -229,6 +264,18 @@ export default function HomeScreen() {
           >
             <Ionicons name="shield-checkmark" size={18} color="#b3b3b3" />
           </TouchableOpacity>
+          {/* Web only: native users already have the app installed. */}
+          {Platform.OS === 'web' && (
+            <TouchableOpacity
+              onPress={handleDownloadAndroidApp}
+              style={styles.headerBtn}
+              activeOpacity={0.85}
+              accessibilityRole="link"
+              accessibilityLabel="Скачать приложение"
+            >
+              <Ionicons name="download-outline" size={18} color="#b3b3b3" />
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
