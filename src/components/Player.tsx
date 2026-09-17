@@ -26,7 +26,11 @@ import { useReducedMotion } from '../hooks/useReducedMotion'
 
 /** Diameter of the play button and of every pulse ring (`.play-btn` / `.pulse-ring`). */
 const PLAY_BUTTON_SIZE = 140
-const PLAY_ICON_SIZE = 48
+/**
+ * Deliberately 2× the old 48 — the glyph now reads at roughly 0.69 of the
+ * button diameter (`96/140`). Do not "fix" it back down to 48.
+ */
+const PLAY_ICON_SIZE = 96
 const RING_DURATION_MS = 2000
 /**
  * CSS `animation-delay` per ring: 0s / 0.6s / 1.2s. Kept in ms as the verbatim
@@ -337,7 +341,10 @@ const styles = StyleSheet.create({
     }),
   },
   playIconGlyph: {
-    marginLeft: 4,
+    // Optical nudge for the Ionicons play triangle's left bias, scaled with
+    // PLAY_ICON_SIZE (was 4 at size 48). Applied to the play state only — the
+    // pause glyph must stay centred.
+    marginLeft: 8,
   },
   spinnerOverlay: {
     position: 'absolute',

@@ -14,6 +14,7 @@ import Animated, {
 import { Ionicons } from '@expo/vector-icons'
 import * as ImagePicker from 'expo-image-picker'
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { storage, STORAGE_KEYS } from '../hooks/useStorage'
 import { COLUMN_MAX_WIDTH, ColumnHeightContext, useAppFrame } from '../utils/layout'
 import type { ChatMessageDTO } from '../hooks/useChat'
@@ -119,6 +120,12 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const flatListRef = useRef<FlatList>(null)
   const API_BASE = process.env.EXPO_PUBLIC_API_URL || ''
+
+  // This sheet lives inside a `Modal` — its own native window — so the root
+  // `SafeAreaView` in `app/app/_layout.tsx` (which insets the main content) does
+  // NOT reach it. Without this, the Android navigation/gesture bar overlaps the
+  // input row. On web `insets.bottom` is 0, so the padding stays as authored.
+  const insets = useSafeAreaInsets()
 
   // One shared progress value (0 = hidden, 1 = fully open) drives both layers:
   // the backdrop only fades, the sheet slides up + fades. `mounted` keeps the
@@ -426,7 +433,11 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
                 }
               />
 
-              <View style={styles.inputArea}>
+              {/* Bottom padding carries the device inset on top of the sheet's
+                  own 12px, so the input clears the nav bar. Applied to the
+                  input area (not the drawer) because they share the background:
+                  the fill still reaches the screen edge, only the content lifts. */}
+              <View style={[styles.inputArea, { paddingBottom: insets.bottom + 12 }]}>
                 <TextInput
                   style={[styles.nicknameInput, nicknameError && styles.inputError]}
                   placeholder="Your name"
@@ -567,7 +578,8 @@ const styles = StyleSheet.create({
   messageImage: { width: 120, height: 120, borderRadius: 8, backgroundColor: '#111' },
   emptyState: { paddingVertical: 40, alignItems: 'center' },
   emptyText: { color: '#666', fontSize: 14 },
-  inputArea: { paddingHorizontal: 16, paddingVertical: 12, borderTopWidth: 1, borderTopColor: '#222' },
+  // `paddingBottom` is set inline (`insets.bottom + 12`) — see the input area.
+  inputArea: { paddingHorizontal: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#222' },
   nicknameInput: { backgroundColor: '#222', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, color: '#fff', fontSize: 14, marginBottom: 8 },
   inputError: { borderWidth: 1, borderColor: '#ff4444' },
   fieldError: { color: '#ff4444', fontSize: 12, marginBottom: 4 },
