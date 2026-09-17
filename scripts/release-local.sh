@@ -22,8 +22,8 @@
 #   scripts/release-local.sh --notes-file=NOTES.md  # release body instead of generated notes
 #   scripts/release-local.sh --yes                  # no confirmation prompts
 #
-# Credentials (never passed on the command line)
-# ----------------------------------------------
+# Credentials (hidden prompt — but one consumer still puts them in argv: see below)
+# ---------------------------------------------------------------------------------
 # Exported by you, or typed when prompted (input is hidden, nothing lands in shell history):
 #   KEYSTORE_PATH      path to the release keystore (default: ./release.keystore)
 #   KEYSTORE_PASSWORD  store password
@@ -31,9 +31,22 @@
 #   KEY_PASSWORD       key password (defaults to KEYSTORE_PASSWORD; PKCS12 uses one password)
 #   ANDROID_KEYSTORE_TYPE  pkcs12 (default) or jks
 #
-# The passwords reach Gradle as `-Pandroid.injected.signing.*` properties — the same channel
-# Android Studio and CI use. They are visible in `ps` for the lifetime of the build on this
-# (your) machine, and nowhere else: nothing is written to disk or to the repository.
+# Honest inventory — where the passwords are observable on THIS machine:
+#   • `keytool -list`            — NOT in argv: passed as `-storepass:env KEYSTORE_PASSWORD`
+#                                  (keytool reads the environment variable itself).
+#   • `gradlew assembleRelease`  — IN argv: `-Pandroid.injected.signing.*` properties are the
+#                                  channel Android Studio and CI use, and AGP only reads them
+#                                  as Gradle project properties (command line / gradle.properties
+#                                  / -D). So they ARE visible in `ps` to any local user for the
+#                                  ~10–20 min the build runs. The env-var route
+#                                  (ORG_GRADLE_PROJECT_android.injected.signing.*) and a
+#                                  ~/.gradle/gradle.properties route were both rejected: the
+#                                  former is not a documented AGP channel (a silent failure
+#                                  ships an unsigned APK), the latter writes the secret to disk.
+#   • `verify-apk.sh`            — NOT in argv: passed as `--storepass-env KEYSTORE_PASSWORD`
+#                                  (a few seconds, and only when the keystore is compared).
+# Nothing is ever written to the repository, and the APK is signed from the keystore you own.
+# Do not run this on a shared/multi-user machine.
 #
 # Docs: docs/RELEASING.md §5
 
@@ -71,7 +84,9 @@ sha256_of() {
   fi
 }
 
-usage() { sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
+# Print the whole leading comment block, whatever its length (a hard-coded `sed -n '2,45p'`
+# used to run past the header and dump `set -euo pipefail` / the first variables as "help").
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"; exit 0; }
 
 for arg in "$@"; do
   case "$arg" in
@@ -93,10 +108,13 @@ if [ -z "$VERSION" ]; then
 fi
 VERSION="${VERSION#v}"
 VERSION="${VERSION#app-v}"
-case "$VERSION" in
-  [0-9]*.[0-9]*.[0-9]*) ;;
-  *) die "--version must look like 1.2.3 (got '$VERSION')" ;;
-esac
+# Anchored, and deliberately identical to the SEMVER regex in scripts/prepare-release.mjs
+# (which validates RELEASE_VERSION a few steps later). The old `[0-9]*.[0-9]*.[0-9]*` had two
+# holes: the dots were regex-any-char (so `1x2x3` passed) and it was unanchored (so `1.2.3.4`
+# passed and became the tag `app-v1.2.3.4`).
+if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+  die "--version must look like 1.2.3 (got '$VERSION')"
+fi
 TAG="app-v${VERSION}"
 
 # ─── 2. Credentials — hidden input, never argv ───────────────────────────────
@@ -114,8 +132,10 @@ ask_secret() { # $1 = env var name, $2 = prompt
 ask_secret KEYSTORE_PASSWORD "Keystore password ($(basename "$KEYSTORE_PATH"))"
 KEY_PASSWORD="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
 # Fail before the (long) build if the password/alias do not match the keystore.
+# `-storepass:env` (keytool ≥ JDK 9; this flow runs on the pinned JDK 17/21) keeps the store
+# password out of the local process table — `ps` would otherwise show it for every keytool run.
 keytool -list -keystore "$KEYSTORE_PATH" -storetype "$ANDROID_KEYSTORE_TYPE" \
-  -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null \
+  -storepass:env KEYSTORE_PASSWORD -alias "$KEY_ALIAS" > /dev/null \
   || die "keystore/alias/password combination is invalid (alias '$KEY_ALIAS')"
 ok "keystore OK: $KEYSTORE_PATH (alias $KEY_ALIAS, $ANDROID_KEYSTORE_TYPE)"
 
@@ -200,7 +220,7 @@ cp "$APK_SRC" "$OUT_DIR/$APK_NAME"
 scripts/verify-apk.sh \
   --apk "$OUT_DIR/$APK_NAME" \
   --keystore "$KEYSTORE_PATH" \
-  --storepass "$KEYSTORE_PASSWORD" \
+  --storepass-env KEYSTORE_PASSWORD \
   --alias "$KEY_ALIAS" \
   --storetype "$ANDROID_KEYSTORE_TYPE" \
   --expect-version-code "$VERSION_CODE"

@@ -24,6 +24,7 @@
 #   --apk PATH | --apk=PATH                (required)
 #   --keystore PATH                        verify the signer against this keystore
 #   --storepass PW                         store password (also used as key password for PKCS12)
+#   --storepass-env VAR                    read the store password from $VAR instead of argv
 #   --alias NAME                           key alias inside the keystore
 #   --storetype TYPE                       pkcs12 (default) or jks
 #   --expect-version-code N                fail unless versionCode == N
@@ -41,6 +42,7 @@ set -euo pipefail
 APK=""
 KEYSTORE=""
 STOREPASS=""
+STOREPASS_ENV=""
 ALIAS=""
 STORETYPE="pkcs12"
 EXPECT_VERSION_CODE=""
@@ -49,25 +51,37 @@ AAPT2_OVERRIDE=""
 
 die() { printf 'verify-apk: %s\n' "$*" >&2; exit 1; }
 
+# Value-taking flags: a missing value must say so, not fall out of `shift 2` with no message.
+opt_value() { # $1 = flag name, $2 = remaining arg count
+  [ "$2" -ge 2 ] || die "$1 needs a value"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --apk) APK="${2:-}"; shift 2 ;;
+    --apk) opt_value "--apk" "$#"; APK="$2"; shift 2 ;;
     --apk=*) APK="${1#--apk=}"; shift ;;
-    --keystore) KEYSTORE="${2:-}"; shift 2 ;;
+    --keystore) opt_value "--keystore" "$#"; KEYSTORE="$2"; shift 2 ;;
     --keystore=*) KEYSTORE="${1#--keystore=}"; shift ;;
-    --storepass) STOREPASS="${2:-}"; shift 2 ;;
+    --storepass) opt_value "--storepass" "$#"; STOREPASS="$2"; shift 2 ;;
     --storepass=*) STOREPASS="${1#--storepass=}"; shift ;;
-    --alias) ALIAS="${2:-}"; shift 2 ;;
+    --storepass-env) opt_value "--storepass-env" "$#"; STOREPASS_ENV="$2"; shift 2 ;;
+    --storepass-env=*) STOREPASS_ENV="${1#--storepass-env=}"; shift ;;
+    --alias) opt_value "--alias" "$#"; ALIAS="$2"; shift 2 ;;
     --alias=*) ALIAS="${1#--alias=}"; shift ;;
-    --storetype) STORETYPE="${2:-}"; shift 2 ;;
+    --storetype) opt_value "--storetype" "$#"; STORETYPE="$2"; shift 2 ;;
     --storetype=*) STORETYPE="${1#--storetype=}"; shift ;;
-    --expect-version-code) EXPECT_VERSION_CODE="${2:-}"; shift 2 ;;
+    --expect-version-code) opt_value "--expect-version-code" "$#"; EXPECT_VERSION_CODE="$2"; shift 2 ;;
     --expect-version-code=*) EXPECT_VERSION_CODE="${1#--expect-version-code=}"; shift ;;
-    --apksigner) APKSIGNER_OVERRIDE="${2:-}"; shift 2 ;;
+    --apksigner) opt_value "--apksigner" "$#"; APKSIGNER_OVERRIDE="$2"; shift 2 ;;
     --apksigner=*) APKSIGNER_OVERRIDE="${1#--apksigner=}"; shift ;;
-    --aapt2) AAPT2_OVERRIDE="${2:-}"; shift 2 ;;
+    --aapt2) opt_value "--aapt2" "$#"; AAPT2_OVERRIDE="$2"; shift 2 ;;
     --aapt2=*) AAPT2_OVERRIDE="${1#--aapt2=}"; shift ;;
-    -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)
+      # Print the whole leading comment block: the old `sed -n '2,40p'` ran past the usage
+      # block and printed real code once the header grew.
+      awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"
+      exit 0
+      ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -76,9 +90,17 @@ done
 [ -f "$APK" ] || die "APK not found: $APK"
 [ -s "$APK" ] || die "APK is empty: $APK"
 
+# ─── Store password: argv, environment variable, or neither ─────────────────
+# `--storepass-env VAR` keeps the password out of the process table entirely; resolve it into
+# the same variable the rest of the script uses. Prefer it over `--storepass` when both are set.
+if [ -n "$STOREPASS_ENV" ]; then
+  STOREPASS="${!STOREPASS_ENV:-}"
+  [ -n "$STOREPASS" ] || die "--storepass-env $STOREPASS_ENV: environment variable is empty or unset"
+fi
+
 if [ -n "$KEYSTORE" ]; then
   [ -f "$KEYSTORE" ] || die "keystore not found: $KEYSTORE"
-  [ -n "$STOREPASS" ] || die "--storepass is required together with --keystore"
+  [ -n "$STOREPASS" ] || die "--storepass (or --storepass-env) is required together with --keystore"
   [ -n "$ALIAS" ] || die "--alias is required together with --keystore"
 fi
 
@@ -150,10 +172,15 @@ ACTUAL="$(printf '%s\n' "$CERTS" | awk -F': ' '/certificate SHA-256 digest/ {pri
 [ -n "$ACTUAL" ] || die "could not read a certificate SHA-256 digest from apksigner output"
 
 if [ -n "$KEYSTORE" ]; then
+  # Prefer `-storepass:env` (avoids putting the password in argv) when the caller asked for it.
+  KEYTOOL_PASS_ARGS=(-storepass "$STOREPASS")
+  if [ -n "$STOREPASS_ENV" ]; then
+    KEYTOOL_PASS_ARGS=("-storepass:env" "$STOREPASS_ENV")
+  fi
   EXPECTED="$(keytool -list -v \
       -keystore "$KEYSTORE" \
       -storetype "$STORETYPE" \
-      -storepass "$STOREPASS" \
+      "${KEYTOOL_PASS_ARGS[@]}" \
       -alias "$ALIAS" 2>/dev/null | awk '/SHA256:/ {print $2; exit}')"
   [ -n "$EXPECTED" ] || die "could not read the SHA-256 fingerprint of alias '$ALIAS' from $KEYSTORE"
   if [ "$(printf '%s' "$EXPECTED" | norm)" != "$(printf '%s' "$ACTUAL" | norm)" ]; then

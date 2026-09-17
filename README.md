@@ -1,149 +1,27 @@
-# RAW Radio App
+# RAW Radio
 
-Cross-platform client (Android + Web) for the RAW Radio internet radio station. It plays live streams from multiple substations, shows now-playing metadata, lets listeners search and play tracks on demand, and provides a real-time listener chat.
+Интернет-радио для друзей и единомышленников. Несколько каналов, живые эфиры, чат и библиотека треков — всё в одном приложении.
 
-## Tech Stack
+## Что внутри
 
-| Layer          | Technology                                              |
-| -------------- | ------------------------------------------------------- |
-| Framework      | Expo SDK 57                                             |
-| UI runtime     | React 19.2.3, React Native 0.86.3                       |
-| Navigation     | Expo Router                                             |
-| Audio (native) | `react-native-track-player`                             |
-| Audio (web)    | HTML5 `<audio>` element                                 |
-| Realtime       | `socket.io-client` (stream status + chat)               |
-| Storage        | `@react-native-async-storage/async-storage`             |
-| Language       | TypeScript                                              |
-| Platforms      | Android, Web                                            |
+- **Несколько подстанций** — каналы по жанрам, у каждого свой плейлист и стрим
+- **Живые эфиры** — DJ ведёт трансляцию, метка «Онлайн трансляция» в реальном времени
+- **Чат слушателей** — общайтесь во время эфира, прикрепляйте картинки
+- **Поиск и прослушивание** — найдите любой трек в библиотеке и играйте прямо сейчас
+- **Удобный плеер** — пауза, громкость, переключение каналов
+- **Фоновое воспроизведение** — музыка играет, даже когда экран выключен (Android)
+- **Работает везде** — в браузере на любом устройстве или как приложение на Android
 
-## Requirements
+## Как слушать
 
-- Node.js 20 or newer
-- npm
-- For native Android builds: Android Studio (with Android SDK and an emulator or connected device)
+**Сайт:** [raw-radio.ru](https://raw-radio.ru)
 
-## Setup
+**Android:** [Скачать APK](https://github.com/raw-radio/raw-radio_app/releases/latest/download/raw-radio-universal.apk) — откройте ссылку на телефоне, скачайте файл и установите (нужно разрешить установку из неизвестных источников).
 
-```bash
-npm install
-cp .env.example .env   # fill EXPO_PUBLIC_API_URL / EXPO_PUBLIC_WS_URL
-npm run start          # dev server
-npm run web            # web target
-npm run android        # native Android
-```
+## Для разработчиков
 
-## Project Structure
+Исходный код приложения, инструкции по сборке и развитию: [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md), [docs/RELEASING.md](./docs/RELEASING.md).
 
-```
-app/
-├── app/                      # Expo Router screens
-│   ├── _layout.tsx           # Root layout (safe area, status bar, stack)
-│   └── index.tsx             # Home screen
-├── src/
-│   ├── api/
-│   │   └── client.ts         # HTTP client, now-playing, track search
-│   ├── components/
-│   │   ├── ChatSheet.tsx     # Listener chat panel
-│   │   ├── Player.tsx        # Main player UI
-│   │   ├── PlayerBar.tsx     # On-demand track progress bar
-│   │   ├── ShareButton.tsx   # Stream share action
-│   │   ├── SubstationSelector.tsx
-│   │   ├── TrackSearchModal.tsx
-│   │   └── VolumeSlider.tsx
-│   ├── hooks/
-│   │   ├── useAudioPlayer.ts      # Native audio (react-native-track-player)
-│   │   ├── useAudioPlayer.web.ts  # Web audio (HTML <audio>)
-│   │   ├── useChat.ts             # Chat state via socket.io
-│   │   ├── useStorage.ts          # AsyncStorage helpers
-│   │   ├── useStreamStatus.ts     # Live status + now-playing via socket.io
-│   │   ├── useSubstations.ts      # Substation list
-│   │   └── useTrackSearch.ts      # Track search
-│   ├── services/
-│   │   ├── oneSignal.ts           # OneSignal init (native)
-│   │   ├── oneSignal.web.ts       # Web no-op (SDK is native-only)
-│   │   ├── registerPlaybackService.ts     # RNTP playback service registration
-│   │   ├── registerPlaybackService.web.ts # Web no-op
-│   │   └── trackPlayerService.ts  # Remote control event handlers
-│   ├── types/
-│   │   └── index.ts          # Shared TypeScript types
-│   └── utils/
-│       └── format.ts         # Formatting helpers
-├── assets/                   # Icons, splash and adaptive icon images
-├── app.json                  # Expo configuration
-├── tsconfig.json
-└── .env.example
-```
+## Лицензия
 
-## Architecture
-
-The audio layer is platform-split. Metro resolves `useAudioPlayer` to a different implementation per platform:
-
-- `src/hooks/useAudioPlayer.ts` — native Android playback backed by `react-native-track-player`.
-- `src/hooks/useAudioPlayer.web.ts` — web playback using a plain HTML5 `<audio>` element.
-
-Both implementations expose the same hook API, so the UI in `app/index.tsx` stays platform-agnostic. Realtime features (stream status and chat) use `socket.io-client` in both targets.
-
-## Configuration
-
-The app is configured entirely through public Expo environment variables, defined in `.env` (copied from `.env.example`):
-
-| Variable                | Purpose                                          |
-| ----------------------- | ------------------------------------------------ |
-| `EXPO_PUBLIC_API_URL`   | Base URL of the RAW Radio HTTP API               |
-| `EXPO_PUBLIC_WS_URL`    | URL of the realtime (socket.io) server           |
-| `EXPO_PUBLIC_ONESIGNAL_APP_ID` | OneSignal app id used for push notifications |
-
-Example values use placeholders only:
-
-```
-EXPO_PUBLIC_API_URL=https://your-api.example
-EXPO_PUBLIC_WS_URL=https://your-ws.example
-```
-
-Only variables prefixed with `EXPO_PUBLIC_` are embedded into the client bundle and are therefore **public**. Never place secrets, tokens, private keys, or credentials in this repository or in `EXPO_PUBLIC_*` variables. `.env` files are git-ignored.
-
-## Push notifications (OneSignal)
-
-Phase 1: the app **receives** push notifications. Sending from the admin panel is a later phase.
-
-- **Env var**: `EXPO_PUBLIC_ONESIGNAL_APP_ID` must hold the OneSignal app id. It is a public identifier (it ships inside the bundle, like the Firebase config), so an empty placeholder is committed in `.env.example` and the real value lives in the git-ignored `.env`. If the variable is empty, OneSignal init is skipped entirely.
-- **Credentials**: the **FCM v1 Service Account JSON** is a secret. It goes **only** into the OneSignal dashboard (Settings → Push & In-App → Android → FCM v1). It must **never** be added to this repository, to `.env`, or to `app.json` — the repo is public.
-- **Expo Go is not supported**: `react-native-onesignal` is a native module, so a **dev build / prebuild** is required (`npx expo prebuild --platform android` then `npm run android`). Send a test push from the OneSignal dashboard (Audience → Subscriptions → New Message → Test) after the app registers.
-- **Runtime permission**: the app requests notification permission on first launch (`requestPermission(true)`).
-- **Tap handling**: a push may carry a deep link in `additionalData.url` (e.g. `additionalData: { "url": "/?station=rock" }`). Only internal paths starting with a single `/` are accepted; absolute (`https://…`) and protocol-relative (`//…`) URLs are ignored. There is currently a single route (`/`), so links resolve to the home screen.
-- **Release builds**: `app.json` uses `mode: "development"` for the OneSignal plugin (the option is required even for Android-only). It only controls the iOS `aps-environment` entitlement, so it has no effect on the Android APK; the release workflow still forces `"production"` in its own workspace before `expo prebuild`. When building a release APK **locally**, change it manually and re-run `npx expo prebuild --platform android --clean`.
-- **Web push is not supported in this phase.** `react-native-onesignal` has no React Native Web build, so `src/services/oneSignal.web.ts` is an intentional no-op and no OneSignal code is bundled for web. Web push would be a separate integration (`react-onesignal` + a service worker).
-- **Logging**: the native SDK runs at `LogLevel.Verbose` while this feature is being brought up; lower it before release.
-
-## Releasing (Android)
-
-Signed release APKs are built and published by CI
-([`.github/workflows/release.yml`](./.github/workflows/release.yml)) whenever a tag matching
-`app-v*` is pushed:
-
-```bash
-git tag app-v0.2.0
-git push origin --tags
-```
-
-The newest release is always available at a stable URL:
-
-```
-https://github.com/raw-radio/raw-radio_app/releases/latest/download/raw-radio-universal.apk
-```
-
-The Android signing keystore and its passwords exist **only** as GitHub Secrets — they are never
-committed to this (public) repository, and the workflow decodes the keystore into a temporary
-runner directory for the duration of the build. Losing the keystore means no further updates can
-be published for `com.rawradio.app`, so keep an offline backup.
-
-One-time keystore generation, the exact list of secrets/variables, the full release checklist,
-local release builds and APK-size options: **[docs/RELEASING.md](./docs/RELEASING.md)**.
-
-## License
-
-Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](./LICENSE) for the full text.
-
-## Contributing
-
-Contributions are welcome. Open an issue to discuss a change before submitting a pull request, keep changes focused, and make sure the project builds for both Android and Web.
+GNU Affero General Public License v3.0 (AGPL-3.0). Подробности — [LICENSE](./LICENSE).

@@ -30,6 +30,23 @@ const { withGradleProperties } = require('expo/config-plugins')
 // Heap for the Gradle daemon: Compose + AGP + Lint analysis of ~50 modules.
 const GRADLE_JVMARGS = '-Xmx6144m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8'
 
+// The flags this plugin owns. They are (re)written from VALUES; every OTHER flag found in an
+// existing `org.gradle.jvmargs` is carried over, so a third-party plugin, a template change or
+// CI that adds e.g. `-XX:+HeapDumpOnOutOfMemoryError` / `-XX:+UseParallelGC` does not silently
+// lose it. (`prepare-android-studio.sh` still overwrites the value with its own managed block
+// for the local Android Studio flow — that is intentional and unaffected.)
+const OWNED_JVMARGS = ['-Xmx6144m', '-XX:MaxMetaspaceSize=1024m', '-Dfile.encoding=UTF-8']
+const OWNED_JVMARGS_RE = [/^-Xmx/, /^-XX:MaxMetaspaceSize=/, /^-Dfile\.encoding=/]
+
+// Keep the owned values, preserve everything else, and never duplicate a flag.
+function mergeJvmArgs(existing) {
+  const flags = String(existing || '')
+    .split(/\s+/)
+    .filter(Boolean)
+  const preserved = flags.filter((flag) => !OWNED_JVMARGS_RE.some((re) => re.test(flag)))
+  return [...OWNED_JVMARGS, ...preserved].join(' ')
+}
+
 // Gradle properties this plugin owns. Anything listed here is replaced (never duplicated):
 // `properties-parser` keeps a list of items, and a second `org.gradle.jvmargs` would make
 // the effective value depend on file order.
@@ -46,13 +63,21 @@ function upsertProperty(properties, key, value) {
 
 module.exports = function withGradleJvmArgs(config) {
   return withGradleProperties(config, (cfg) => {
+    // Read the value the template (or another plugin) produced BEFORE dropping it, so its
+    // non-owned flags can be preserved. With several duplicate entries only the first one's
+    // extra flags survive — a duplicate `org.gradle.jvmargs` is already broken config.
+    const previous = cfg.modResults.find(
+      (item) => item.type === 'property' && MANAGED_PROPERTIES.includes(item.key),
+    )
+    const value = mergeJvmArgs(previous && previous.value)
     // Defensive: drop any duplicate the template (or another plugin) may have produced.
     cfg.modResults = cfg.modResults.filter(
       (item) => !(item.type === 'property' && MANAGED_PROPERTIES.includes(item.key)),
     )
-    upsertProperty(cfg.modResults, 'org.gradle.jvmargs', GRADLE_JVMARGS)
+    upsertProperty(cfg.modResults, 'org.gradle.jvmargs', value)
     return cfg
   })
 }
 
 module.exports.GRADLE_JVMARGS = GRADLE_JVMARGS
+module.exports.mergeJvmArgs = mergeJvmArgs

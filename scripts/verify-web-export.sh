@@ -10,9 +10,13 @@
 #    https://raw-radio.ru URLs baked into the previous bundle — with no
 #    warning and no error. This script is the assertion that catches it.
 #
-#  Rule: no absolute `https://raw-radio.ru` may appear anywhere in the
-#  exported JS bundles. The only allowed occurrence of the domain is the
-#  `copyright@raw-radio.ru` e-mail in the legal copy.
+#  Rule: no ABSOLUTE raw-radio.ru URL of any scheme may appear in the exported JS
+#  bundles — not only `https://raw-radio.ru`, but also `wss://raw-radio.ru`
+#  (the socket origin, which is the other half of the same-origin contract) and any
+#  subdomain (`https://www.raw-radio.ru`, `https://api.raw-radio.ru`, …). Matching
+#  only the bare `https://raw-radio.ru` host left `wss://raw-radio.ru` and
+#  subdomains undetected. The only allowed occurrence of the domain is the
+#  `copyright@raw-radio.ru` e-mail in the legal copy (no scheme → not matched).
 #
 #  Usage:
 #    bash scripts/verify-web-export.sh            # verifies ./dist
@@ -42,15 +46,26 @@ if [ "${BUNDLE_COUNT}" -eq 0 ]; then
   die "no exported JS bundles found under ${DIST}/_expo — the export looks empty"
 fi
 
-info "checking ${BUNDLE_COUNT} bundle(s) for absolute https://raw-radio.ru"
+info "checking ${BUNDLE_COUNT} bundle(s) for absolute raw-radio.ru URLs (any scheme/subdomain)"
+
+# Same-origin assertion. The host part is optional-subdomain (`([a-z0-9.-]+\.)?`) and the
+# scheme covers both transports the app uses: http(s) for the API and ws(s) for the socket.
+# Case-insensitive: a bundle may contain `HTTPS://WWW.RAW-RADIO.RU`.
+URL_RE='(https?|wss?)://([a-z0-9.-]+\.)?raw-radio\.ru'
+# Positive character class for the rest of the URL. A positive class avoids the
+# nested-quoting gymnastics of `[^"'` )]` (bash 3.2 has no clean way to spell a
+# single quote inside a double-quoted regex) and stops exactly where the old class did:
+# at `"`, `'`, a backtick, a space and `)`. Hyphen last keeps the range unambiguous.
+URL_TAIL='[A-Za-z0-9/._:%?&=#~+@,-]*'
 
 FOUND=""
 while IFS= read -r bundle; do
   [ -n "${bundle}" ] || continue
-  # Strip the allowed e-mail first, then look for the domain as an URL host.
-  # `sed` on the bundle text keeps this independent of bundler formatting.
+  # Strip the allowed e-mail first (defensive: no scheme, so it is not matched anyway),
+  # then look for the domain as an URL host. `sed` on the bundle text keeps this
+  # independent of bundler formatting.
   matches="$(sed 's/copyright@raw-radio\.ru//g' "${bundle}" \
-    | grep -o 'https://raw-radio\.ru[^"'"'"'` )]*' | sort -u || true)"
+    | grep -oiE "${URL_RE}${URL_TAIL}" | sort -u || true)"
   if [ -n "${matches}" ]; then
     FOUND="${FOUND}${bundle#"${DIST}/"}:
 ${matches}
@@ -68,7 +83,7 @@ if [ -n "${FOUND}" ]; then
   (without --clear Metro reuses the cached bundle and ignores the env change)"
 fi
 
-ok "same-origin assertion passed (no absolute https://raw-radio.ru in the bundles)"
+ok "same-origin assertion passed (no absolute raw-radio.ru URL in the bundles)"
 
 # The self-destruct service worker must reach the export — without it the
 # legacy Vite-PWA worker is never evicted (see docs/WEB_STATIC_DEPLOY.md §8).

@@ -7,7 +7,12 @@
 #    ...or build locally and publish the artifact you built — see docs/RELEASING.md §5
 #    (`scripts/release-local.sh`), which is the preferred flow.
 #
-#  Manual run (build only, no release): Actions → "RAW Radio App Release" → Run workflow
+#  Manual run — BUILD ONLY, never publishes. `workflow_dispatch` can be launched with a tag as
+#  the ref, in which case `github.ref` is `refs/tags/app-v*` and a ref-only gate would publish.
+#  The publish step therefore requires `github.event_name == 'push'`: a manual run only
+#  produces the workflow artifact. (It also takes its version from the `version` input / app.json,
+#  so a manually built APK must never land under a tag that was pushed for a different version.)
+#  Actions → "RAW Radio App Release" → Run workflow
 #
 #  ── Local builds win (release idempotency) ────────────────────────────────
 #  `scripts/release-local.sh` builds the APK on the developer machine, then pushes the tag
@@ -16,14 +21,17 @@
 #    • `preflight` job — if a release for the tag already exists, the whole build is skipped
 #      (saves ~20 CI minutes). It is best-effort: the tag is created a moment before the
 #      release object, so a slow runner could still see "no release yet".
-#    • `gate` step (right before publishing) — authoritative and race-free by construction:
-#      it re-checks after the ~20 min build and skips publishing, keeping the locally built
-#      artifact intact even if `preflight` missed.
-#  Failure mode we accept: if both guards were to fail (e.g. GitHub API outage at both
-#  moments), CI would publish its own APK of the same commit under the same asset name —
-#  same version, different SHA-256. The workflow summary prints the SHA-256 so a mismatch is
-#  detectable; the release notes are `generate_release_notes` (no locally written body to
-#  lose). Re-running the workflow after the API recovers restores the guard behaviour.
+#    • `gate` step (right before publishing) — narrows that window to the few seconds between
+#      `gh release view` and the publish step, i.e. the ~20 min build no longer counts. It is
+#      still a check-then-act, NOT atomic: a locally published release that appears inside that
+#      window would still be clobbered. `softprops/action-gh-release` has no compare-and-swap,
+#      so full race-freedom is not achievable here.
+#  Failure mode we accept: if both guards were to miss (release created inside the `gate`
+#  window, or a GitHub API outage at both moments), CI would publish its own APK of the same
+#  commit under the same asset name — same version, different SHA-256. The workflow summary
+#  prints the SHA-256 so a mismatch is detectable; the release notes are
+#  `generate_release_notes` (no locally written body to lose). Re-running the workflow after
+#  the API recovers restores the guard behaviour.
 #
 #  Required repository secrets (Settings → Secrets and variables → Actions → Secrets):
 #    ANDROID_KEYSTORE_BASE64  — base64 of the release keystore
@@ -397,13 +405,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # Authoritative, race-free guard. `preflight` can be fooled by the milliseconds between
-      # the tag being pushed and the release object appearing; ~20 minutes later it cannot.
+      # Best-effort guard. `preflight` can be fooled by the milliseconds between the tag being
+      # pushed and the release object appearing; ~20 minutes later it is far less likely, so
+      # this narrows the race to the seconds between `gh release view` and the publish step.
+      # It is a check-then-act, not a CAS: a release published inside that window still loses.
       # If a release for this tag already exists (published from a local build), we keep it
       # untouched and only the workflow artifact above is produced.
       - name: Gate — do not clobber an existing release
         id: release_gate
-        if: startsWith(github.ref, 'refs/tags/app-v')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/app-v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -415,9 +425,12 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Only tag pushes publish a release; manual runs stop after the artifact upload.
+      # Only a TAG PUSH publishes. `workflow_dispatch` may be started with a tag as its ref, in
+      # which case `github.ref` is `refs/tags/app-v*` too — but the version comes from the
+      # `version` input / app.json, so publishing there could attach an APK of a different
+      # version to that tag. Gating on the event name keeps manual runs build-only.
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/app-v') && steps.release_gate.outputs.skip != 'true'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/app-v') && steps.release_gate.outputs.skip != 'true'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}

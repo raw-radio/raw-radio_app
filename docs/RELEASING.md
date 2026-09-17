@@ -15,7 +15,7 @@ Tag pattern: `app-v*` → signed release APK → GitHub Release.
 # one-time: keystore + GitHub secrets (sections 1 and 2)
 
 # every release — PREFERRED: build here, ship that exact binary (section 5)
-export KEYSTORE_PATH=/path/to/release.keystore      # passwords are prompted, never on argv
+export KEYSTORE_PATH=/path/to/release.keystore      # passwords are prompted (hidden) when unset
 scripts/release-local.sh --version=0.2.0
 
 # alternative: let CI build it (push a tag — CI publishes the release itself)
@@ -150,8 +150,10 @@ the production API.
    ```
 
 **Manual run:** `Actions → RAW Radio App Release → Run workflow` builds the APK and uploads it as
-a workflow artifact only (no release is created, no tag needed). The optional `version` input
-overrides the version, `r8` enables R8/resource shrinking (experimental — section 6).
+a workflow artifact only — never a release, no tag needed, and the publish step additionally
+requires `github.event_name == 'push'`, so even a manual run started *on* an `app-v*` tag is
+build-only. The optional `version` input overrides the version, `r8` enables R8/resource
+shrinking (experimental — section 6).
 
 ### 3.1 Local release vs. tag-triggered CI build
 
@@ -161,10 +163,12 @@ Both flows end in a GitHub Release whose tag is `app-vX.Y.Z`. They must not figh
 - The tag push triggers this workflow. Its `preflight` job asks the API whether a release for
   that tag exists; if it does, the build is skipped entirely (~20 CI minutes saved).
 - The tag is created a moment before the release object, so a very fast runner could still see
-  "no release yet". That is why there is a **second, authoritative gate** immediately before
-  publishing: after the ~20 min build it re-checks and skips the upload, leaving the locally
-  built APK untouched. The CI-built APK is still uploaded as a workflow artifact for
-  comparison.
+  "no release yet". That is why there is a **second gate** immediately before publishing: after
+  the ~20 min build it re-checks and skips the upload, leaving the locally built APK untouched.
+  It **narrows** the race to the seconds between `gh release view` and the publish step rather
+  than eliminating it — it is a check-then-act, not a compare-and-swap (the release action has
+  no CAS), so a release published inside that window is still clobbered. The CI-built APK is
+  also uploaded as a workflow artifact for comparison.
 - Accepted failure mode: if both checks were to fail (e.g. GitHub API outage at both
   moments), CI publishes its own build of the same commit under the same asset name — same
   version, different SHA-256. The workflow summary prints the hash, so a mismatch is
@@ -232,7 +236,11 @@ One command does prebuild → signed build → verification → tag → release:
 cd app
 export KEYSTORE_PATH="/absolute/path/to/release.keystore"   # default: ./release.keystore
 # KEYSTORE_PASSWORD / KEY_PASSWORD / KEY_ALIAS are prompted (hidden) when unset.
-# Exporting them is fine too; they are never passed on the command line.
+# Exporting them is fine too. NOTE: they are NOT invisible in the process table — `gradlew`
+# receives them as `-Pandroid.injected.signing.*` Gradle properties, so they are visible in
+# `ps` to local users for the ~10–20 min the build runs. `keytool` and `verify-apk.sh` get the
+# store password via the environment instead (`-storepass:env` / `--storepass-env`). Do not run
+# this on a shared/multi-user machine; see the header of scripts/release-local.sh.
 scripts/release-local.sh --version=0.2.0
 ```
 
@@ -287,7 +295,7 @@ cd android
   -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
 
 cd .. && scripts/verify-apk.sh --apk android/app/build/outputs/apk/release/app-release.apk \
-  --keystore "$KEYSTORE_PATH" --storepass "$KEYSTORE_PASSWORD" --alias "$KEY_ALIAS"
+  --keystore "$KEYSTORE_PATH" --storepass-env KEYSTORE_PASSWORD --alias "$KEY_ALIAS"
 ```
 
 For a debug build (no keystore needed): `npm run android` or
