@@ -9,6 +9,8 @@ expo-env.d.ts
 android/
 ios/
 *.jks
+*.keystore
+keystore.properties
 *.p8
 *.p12
 *.key

@@ -1,7 +1,17 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react'
-import { Animated, Easing, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import React, { useState, useCallback, useEffect } from 'react'
+import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import Animated, {
+  cancelAnimation,
+  Easing as ReanimatedEasing,
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withTiming,
+} from 'react-native-reanimated'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
+import { useRouter } from 'expo-router'
 import { useAudioPlayer } from '../src/hooks/useAudioPlayer'
 import { useStreamStatus } from '../src/hooks/useStreamStatus'
 import { useSubstations } from '../src/hooks/useSubstations'
@@ -18,16 +28,21 @@ import { ShareButton } from '../src/components/ShareButton'
 import type { OnDemandTrack } from '../src/types'
 
 /** Connection dot colors, mirrored from `.connection-dot--*` in player.scss. */
-const DOT_CONNECTED = '#2ecc71'
-const DOT_DISCONNECTED = '#e74c3c'
-/** `dotPulse` — 2s ease-in-out, half-period for each direction. */
+const DOT_CONNECTED = '#2bc96d'
+const DOT_CONNECTED_BORDER = '#1a723f'
+const DOT_DISCONNECTED = '#d64838'
+/**
+ * `dotPulse` — `animation: dotPulse 2s ease-in-out infinite`. The shared value
+ * travels one direction per half-period, so a full breath is 2 × 1000ms = 2s,
+ * matching the web keyframes (`0%/100% → 50% → 0%/100%`).
+ */
 const DOT_PULSE_HALF_MS = 1000
-const DOT_PULSE_MIN_OPACITY = 0.5
-const DOT_PULSE_MIN_SCALE = 0.85
+const DOT_PULSE_MIN_OPACITY = 0.3
 
 const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' })
 
 export default function HomeScreen() {
+  const router = useRouter()
   const { substations, currentSlug, selectSubstation } = useSubstations()
   const { status, connected, refreshNowPlaying } = useStreamStatus(currentSlug)
   const {
@@ -49,14 +64,15 @@ export default function HomeScreen() {
     trackProgress,
     playTrack,
     stopTrack,
+    setNowPlaying,
   } = useAudioPlayer(currentSlug)
 
   const [searchOpen, setSearchOpen] = useState(false)
   const [chatVisible, setChatVisible] = useState(false)
 
   const reducedMotion = useReducedMotion()
-  const dotOpacity = useRef(new Animated.Value(1)).current
-  const dotScale = useRef(new Animated.Value(1)).current
+  /** 0 → 1 → 0 breath, driven by a single shared value (Reanimated, UI thread). */
+  const dotPulse = useSharedValue(0)
 
   useWakeLock(state === 'playing' || state === 'buffering' || state === 'loading')
 
@@ -65,12 +81,21 @@ export default function HomeScreen() {
     if (!chatIsOpen) setChatVisible(false)
   }, [chatIsOpen])
 
+  // Push now-playing metadata to the OS media session. On web this feeds the
+  // Media Session API (lock-screen/tray controls); on native it is a no-op and
+  // react-native-track-player owns the system controls. One effect for both
+  // platforms, so no platform branching at the call site.
+  useEffect(() => {
+    setNowPlaying({ title: status.trackTitle, artist: status.trackArtist })
+  }, [status.trackTitle, status.trackArtist, setNowPlaying])
+
   const isPlaying =
     state === 'playing' || state === 'buffering' || state === 'loading' || state === 'reconnecting'
   const isLive = status.type === 'live' || showLiveLabel
 
   const dotPulsing = connected && isPlaying && !reducedMotion
   const dotColor = connected ? DOT_CONNECTED : DOT_DISCONNECTED
+  const dotBorderColor = connected ? DOT_CONNECTED_BORDER : DOT_DISCONNECTED
   const connectionLabel = connected
     ? isPlaying
       ? 'Connected — playing'
@@ -78,57 +103,51 @@ export default function HomeScreen() {
     : 'Disconnected'
 
   // `connection-dot--playing` — animate opacity/scale only while the stream plays.
+  //
+  // `withRepeat(..., -1, reverse: true)` makes the shared value travel 0 → 1 → 0
+  // continuously: the reverse leg IS the second half of the cycle, so the value
+  // never has to snap back to its origin at a cycle boundary (which is exactly
+  // what made the previous `Animated.loop` + `reverse: false` sequence janky).
+  // `Easing.inOut(Easing.ease)` keeps both turnarounds soft, matching the web's
+  // `ease-in-out`.
+  //
+  // The dependency list holds ONLY the gating boolean and the shared value (which
+  // is stable): no object/array is recreated per render, so an unrelated re-render
+  // can no longer tear down and restart the loop mid-breath.
   useEffect(() => {
     if (!dotPulsing) {
-      dotOpacity.stopAnimation()
-      dotScale.stopAnimation()
-      dotOpacity.setValue(1)
-      dotScale.setValue(1)
+      cancelAnimation(dotPulse)
+      dotPulse.value = 0
       return
     }
 
-    const opacityAnimation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(dotOpacity, {
-          toValue: DOT_PULSE_MIN_OPACITY,
-          duration: DOT_PULSE_HALF_MS,
-          easing: Easing.inOut(Easing.ease),
-          useNativeDriver: true,
-        }),
-        Animated.timing(dotOpacity, {
-          toValue: 1,
-          duration: DOT_PULSE_HALF_MS,
-          easing: Easing.inOut(Easing.ease),
-          useNativeDriver: true,
-        }),
-      ]),
+    // Restart from a clean phase, then breathe forever.
+    cancelAnimation(dotPulse)
+    dotPulse.value = 0
+    dotPulse.value = withRepeat(
+      withTiming(1, {
+        duration: DOT_PULSE_HALF_MS,
+        easing: ReanimatedEasing.inOut(ReanimatedEasing.ease),
+      }),
+      -1,
+      true,
     )
-
-    const scaleAnimation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(dotScale, {
-          toValue: DOT_PULSE_MIN_SCALE,
-          duration: DOT_PULSE_HALF_MS,
-          easing: Easing.inOut(Easing.ease),
-          useNativeDriver: true,
-        }),
-        Animated.timing(dotScale, {
-          toValue: 1,
-          duration: DOT_PULSE_HALF_MS,
-          easing: Easing.inOut(Easing.ease),
-          useNativeDriver: true,
-        }),
-      ]),
-    )
-
-    opacityAnimation.start()
-    scaleAnimation.start()
 
     return () => {
-      opacityAnimation.stop()
-      scaleAnimation.stop()
+      cancelAnimation(dotPulse)
     }
-  }, [dotOpacity, dotPulsing, dotScale])
+  }, [dotPulsing, dotPulse])
+
+  // Single style object for both properties → one shared value, one driver,
+  // perfect phase sync between opacity and scale (the old code ran two
+  // independent `Animated.loop`s that could drift apart).
+  // The glow stays static on purpose, like `.connection-dot`'s static
+  // `box-shadow`: animated shadow props are not portable (Android draws shadows
+  // via `elevation` only, and react-native-web prefers `boxShadow`), so
+  // animating them would risk platform warnings for no visual gain.
+  const dotAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(dotPulse.value, [0, 1], [1, DOT_PULSE_MIN_OPACITY]),
+  }))
 
   const handlePlay = useCallback(async () => {
     await toggle()
@@ -170,9 +189,9 @@ export default function HomeScreen() {
               {
                 backgroundColor: dotColor,
                 shadowColor: dotColor,
-                opacity: dotOpacity,
-                transform: [{ scale: dotScale }],
+                borderColor: dotBorderColor,
               },
+              dotAnimatedStyle,
             ]}
           />
         </View>
@@ -200,6 +219,16 @@ export default function HomeScreen() {
               <Ionicons name="chatbubble-ellipses" size={18} color="#b3b3b3" />
             </TouchableOpacity>
           )}
+          {/* Legal page — same ShieldCheck action as the web player header. */}
+          <TouchableOpacity
+            onPress={() => router.push('/copyright')}
+            style={styles.headerBtn}
+            activeOpacity={0.85}
+            accessibilityRole="button"
+            accessibilityLabel="Правообладателям"
+          >
+            <Ionicons name="shield-checkmark" size={18} color="#b3b3b3" />
+          </TouchableOpacity>
         </View>
       </View>
 
@@ -284,6 +313,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.6,
     shadowRadius: 6,
+    borderWidth: 1,
   },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   headerBtn: {

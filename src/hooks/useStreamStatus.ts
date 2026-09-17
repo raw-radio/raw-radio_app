@@ -44,6 +44,9 @@ export function useStreamStatus(activeSlug?: string) {
   const socketRef = useRef<Socket | null>(null)
   const activeSlugRef = useRef(activeSlug)
   activeSlugRef.current = activeSlug
+  // stale-guard для fetch now-playing: seq растёт при каждом запросе, ответ
+  // принимается только если он всё ещё актуален (станция не переключилась).
+  const fetchSeqRef = useRef(0)
 
   const handleTrackChange = useCallback(
     (data: { substationId?: string; substationSlug?: string; trackTitle?: string | null; trackArtist?: string | null }) => {
@@ -108,8 +111,21 @@ export function useStreamStatus(activeSlug?: string) {
     })
     socketRef.current = socket
 
-    socket.on('connect', () => setConnected(true))
+    socket.on('connect', () => {
+      setConnected(true)
+      // Просим сервер немедленно прислать текущий статус станции, не дожидаясь
+      // следующего broadcast-события.
+      const payload = activeSlugRef.current ? { substationId: activeSlugRef.current } : undefined
+      socket.emit('stream:get-status', payload)
+    })
     socket.on('disconnect', () => setConnected(false))
+
+    // Сокет мог подключиться до навешивания обработчика (reconnect/keep-alive) —
+    // тогда запрашиваем статус сразу.
+    if (socket.connected) {
+      const payload = activeSlugRef.current ? { substationId: activeSlugRef.current } : undefined
+      socket.emit('stream:get-status', payload)
+    }
 
     socket.on('stream:status', (dto: StreamStatus) => {
       if (!isForActiveSubstation(dto, activeSlugRef.current)) return
@@ -136,13 +152,19 @@ export function useStreamStatus(activeSlug?: string) {
     }
   }, [handleNowPlaying, handleTrackChange, handleDjChange, handleAdminStats])
 
+  // Принудительный fetch now-playing с сервера. stale-guard через fetchSeqRef:
+  // любой новый fetch (смена станции / повторный play) инвалидирует предыдущий
+  // ответ, поэтому медленный ответ по старой станции не перезапишет текущую.
   const refreshNowPlaying = useCallback(() => {
+    const seq = ++fetchSeqRef.current
     const slug = activeSlugRef.current ?? null
     if (!slug) return
     const base = process.env.EXPO_PUBLIC_API_URL || ''
     fetch(`${base}/api/v1/playlist/now-playing?substationId=${encodeURIComponent(slug)}`)
       .then((res) => res.json())
       .then((entry) => {
+        // stale-guard: activeSlug мог измениться, пока шёл запрос — отбрасываем ответ
+        if (fetchSeqRef.current !== seq) return
         const data = entry?.data || entry
         if (data) {
           setStatus((prev) => ({
@@ -155,9 +177,29 @@ export function useStreamStatus(activeSlug?: string) {
       .catch(() => {})
   }, [])
 
+  // Fetch-on-mount / fetch-on-station-change: сразу показываем текущий трек станции,
+  // не дожидаясь WS-события. Оптимистичная очистка при смене станции — трек
+  // предыдущей станции не должен висеть до прихода нового.
   useEffect(() => {
-    if (activeSlug) refreshNowPlaying()
+    const slug = activeSlug ?? null
+    setStatus((prev) => ({
+      ...prev,
+      substationId: slug ?? prev.substationId,
+      trackTitle: null,
+      trackArtist: null,
+    }))
+    refreshNowPlaying()
   }, [activeSlug, refreshNowPlaying])
+
+  // При смене activeSlug запрашиваем статус у сервера для новой подстанции,
+  // чтобы не ждать следующего broadcast-события.
+  useEffect(() => {
+    const socket = socketRef.current
+    if (socket?.connected) {
+      const payload = activeSlug ? { substationId: activeSlug } : undefined
+      socket.emit('stream:get-status', payload)
+    }
+  }, [activeSlug])
 
   return { status, connected, refreshNowPlaying }
 }

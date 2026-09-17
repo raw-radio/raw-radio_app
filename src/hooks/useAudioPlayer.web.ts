@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { storage, STORAGE_KEYS } from './useStorage'
 import { getTrackStreamUrl } from '../api/client'
-import type { PlayerState, PlayerMode, OnDemandTrack } from '../types'
+import type { PlayerState, PlayerMode, OnDemandTrack, NowPlayingMeta } from '../types'
 
 const MAX_RETRY_DELAY = 30000
 const BUFFERING_TIMEOUT = 10_000
@@ -33,6 +33,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   const [mode, setMode] = useState<PlayerMode>('radio')
   const [currentTrack, setCurrentTrack] = useState<OnDemandTrack | null>(null)
   const [trackProgress, setTrackProgress] = useState<TrackProgress>({ currentTime: 0, duration: 0 })
+  const [nowPlaying, setNowPlayingState] = useState<NowPlayingMeta>({ title: null, artist: null })
 
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -44,6 +45,10 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   const volumeRef = useRef(1)
   const prevVolumeRef = useRef(1)
   const onTrackEndedRef = useRef<() => void>(() => {})
+  // Latest transport controls for the Media Session handlers, which are
+  // registered once and must not capture stale closures.
+  const playRef = useRef<() => void>(() => {})
+  const pauseRef = useRef<() => void>(() => {})
 
   const buildStreamUrl = useCallback((s: string) => {
     const base = process.env.EXPO_PUBLIC_API_URL || ''
@@ -277,6 +282,14 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       const audio = audioRef.current
       if (!audio) return
 
+      // A backoff timer scheduled while the radio stream was down must not
+      // resurrect the radio source on top of the on-demand track seconds later
+      // (the timer fires `tryPlay(radio)` and overwrites `audio.src`).
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = null
+      }
+
       setError(null)
       retryCountRef.current = 0
       savedSlugRef.current = slug
@@ -289,6 +302,10 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       const url = getTrackStreamUrl(track.id)
       currentUrlRef.current = url
       isPlayingRef.current = true
+      // `loadstart` also flips this, but setting it synchronously gives immediate
+      // feedback for the tap (and keeps the state meaningful if the element never
+      // fires `loadstart`).
+      setState('loading')
       audio.src = url
       audio.play().catch((err: any) => {
         if (err?.name === 'NotAllowedError') return
@@ -342,6 +359,86 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     storage.setItem(STORAGE_KEYS.MUTED, String(newMuted))
   }, [muted])
 
+  // Keep the latest controls reachable from the Media Session action handlers.
+  playRef.current = play
+  pauseRef.current = pause
+
+  /**
+   * Feed now-playing metadata into the OS media session. Called from the screen
+   * when `status.trackTitle`/`status.trackArtist` change. Feature-detected and
+   * fully best-effort: a missing/partial Media Session API must never throw or
+   * interrupt playback.
+   */
+  const setNowPlaying = useCallback((meta: NowPlayingMeta) => {
+    setNowPlayingState((prev) =>
+      prev.title === (meta.title ?? null) && prev.artist === (meta.artist ?? null)
+        ? prev
+        : { title: meta.title ?? null, artist: meta.artist ?? null },
+    )
+  }, [])
+
+  // Publish metadata + playback state to the OS tray. Runs whenever the track or
+  // player state changes; guarded so unsupported browsers are a silent no-op.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return
+
+    try {
+      const session = navigator.mediaSession
+      const MediaMetadataCtor = (
+        globalThis as typeof globalThis & { MediaMetadata?: typeof MediaMetadata }
+      ).MediaMetadata
+
+      if (MediaMetadataCtor) {
+        const hasTrack = !!nowPlaying.title
+        session.metadata = new MediaMetadataCtor({
+          title: nowPlaying.title || 'RAW Radio',
+          artist: nowPlaying.artist || (hasTrack ? 'RAW Radio' : 'Listen Live'),
+          album: 'RAW Radio',
+        })
+      }
+
+      const isActive =
+        state === 'playing' ||
+        state === 'loading' ||
+        state === 'buffering' ||
+        state === 'reconnecting'
+      session.playbackState = isActive ? 'playing' : 'paused'
+    } catch {
+      // Media Session is best-effort — ignore unsupported browsers.
+    }
+  }, [nowPlaying, state])
+
+  // Wire OS media controls (play/pause/stop) to the transport. Registered once;
+  // the refs above always point at the latest callbacks.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return
+
+    const session = navigator.mediaSession
+    try {
+      session.setActionHandler('play', () => {
+        if (!isPlayingRef.current) playRef.current()
+      })
+      session.setActionHandler('pause', () => {
+        if (isPlayingRef.current) pauseRef.current()
+      })
+      session.setActionHandler('stop', () => {
+        if (isPlayingRef.current) pauseRef.current()
+      })
+    } catch {
+      // Not every browser supports every action — ignore.
+    }
+
+    return () => {
+      try {
+        session.setActionHandler('play', null)
+        session.setActionHandler('pause', null)
+        session.setActionHandler('stop', null)
+      } catch {
+        // ignore
+      }
+    }
+  }, [])
+
   // Infinite reconnect with exponential backoff (radio mode only)
   useEffect(() => {
     if (modeRef.current === 'track') return
@@ -384,5 +481,6 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     stopTrack,
     position: trackProgress.currentTime,
     duration: trackProgress.duration,
+    setNowPlaying,
   }
 }

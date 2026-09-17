@@ -111,9 +111,34 @@ Phase 1: the app **receives** push notifications. Sending from the admin panel i
 - **Expo Go is not supported**: `react-native-onesignal` is a native module, so a **dev build / prebuild** is required (`npx expo prebuild --platform android` then `npm run android`). Send a test push from the OneSignal dashboard (Audience → Subscriptions → New Message → Test) after the app registers.
 - **Runtime permission**: the app requests notification permission on first launch (`requestPermission(true)`).
 - **Tap handling**: a push may carry a deep link in `additionalData.url` (e.g. `additionalData: { "url": "/?station=rock" }`). Only internal paths starting with a single `/` are accepted; absolute (`https://…`) and protocol-relative (`//…`) URLs are ignored. There is currently a single route (`/`), so links resolve to the home screen.
-- **Release builds**: `app.json` uses `mode: "development"` for the OneSignal plugin (the option is required even for Android-only). Change it to `"production"` before shipping a release build and re-run `npx expo prebuild --platform android --clean`.
+- **Release builds**: `app.json` uses `mode: "development"` for the OneSignal plugin (the option is required even for Android-only). It only controls the iOS `aps-environment` entitlement, so it has no effect on the Android APK; the release workflow still forces `"production"` in its own workspace before `expo prebuild`. When building a release APK **locally**, change it manually and re-run `npx expo prebuild --platform android --clean`.
 - **Web push is not supported in this phase.** `react-native-onesignal` has no React Native Web build, so `src/services/oneSignal.web.ts` is an intentional no-op and no OneSignal code is bundled for web. Web push would be a separate integration (`react-onesignal` + a service worker).
 - **Logging**: the native SDK runs at `LogLevel.Verbose` while this feature is being brought up; lower it before release.
+
+## Releasing (Android)
+
+Signed release APKs are built and published by CI
+([`.github/workflows/release.yml`](./.github/workflows/release.yml)) whenever a tag matching
+`app-v*` is pushed:
+
+```bash
+git tag app-v0.2.0
+git push origin --tags
+```
+
+The newest release is always available at a stable URL:
+
+```
+https://github.com/raw-radio/raw-radio_app/releases/latest/download/raw-radio-universal.apk
+```
+
+The Android signing keystore and its passwords exist **only** as GitHub Secrets — they are never
+committed to this (public) repository, and the workflow decodes the keystore into a temporary
+runner directory for the duration of the build. Losing the keystore means no further updates can
+be published for `com.rawradio.app`, so keep an offline backup.
+
+One-time keystore generation, the exact list of secrets/variables, the full release checklist,
+local release builds and APK-size options: **[docs/RELEASING.md](./docs/RELEASING.md)**.
 
 ## License
 

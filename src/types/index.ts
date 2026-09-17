@@ -34,4 +34,14 @@ export interface OnDemandTrack {
   duration: number | null
 }
 
+/**
+ * Now-playing metadata consumed by the OS media session.
+ * On web it feeds the Media Session API; on native it is a no-op because
+ * react-native-track-player drives the system controls.
+ */
+export interface NowPlayingMeta {
+  title: string | null
+  artist: string | null
+}
+
 export type PlayerMode = 'radio' | 'track'

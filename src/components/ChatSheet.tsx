@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useContext } from 'react'
 import {
   View, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, Pressable, FlatList, Modal, Image,
   ScrollView, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, useWindowDimensions,
@@ -15,6 +15,7 @@ import { Ionicons } from '@expo/vector-icons'
 import * as ImagePicker from 'expo-image-picker'
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator'
 import { storage, STORAGE_KEYS } from '../hooks/useStorage'
+import { COLUMN_MAX_WIDTH, ColumnHeightContext, useAppFrame } from '../utils/layout'
 import type { ChatMessageDTO } from '../hooks/useChat'
 
 const MAX_TEXT_LENGTH = 200
@@ -30,6 +31,8 @@ const SHEET_CLOSE_MS = 200
 const BACKDROP_MAX_OPACITY = 0.5
 /** Bottom sheet reaches at most 80% of the window height (web drawer parity). */
 const SHEET_MAX_HEIGHT_RATIO = 0.8
+/** Desktop cap for the framed web layout — mirrors web `.chat-sheet` `@media (min-width: 768px)`. */
+const SHEET_DESKTOP_MAX_HEIGHT = 600
 
 interface SelectedImage {
   uri: string
@@ -122,10 +125,23 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
   // Modal around while the closing animation runs.
   const progress = useSharedValue(0)
   const [mounted, setMounted] = useState(isOpen)
-  // Reactive window height: rotation / resize recomputes the 80% bound and the
+  // Reactive window height: rotation / resize recomputes the bound and the
   // closing offset instead of freezing a value captured at first render.
   const { height: windowHeight } = useWindowDimensions()
-  const sheetMaxHeight = windowHeight * SHEET_MAX_HEIGHT_RATIO
+  const { framed } = useAppFrame()
+  // Rendered height of the centred column (null on native / narrow web). RN Web
+  // portals `Modal` to `document.body`, so the sheet is not a DOM child of the
+  // column even though it should visually belong to it — hence the explicit
+  // reference to the column's measured height.
+  const columnHeight = useContext(ColumnHeightContext)
+  // Bound the sheet by 80% of the viewport (web drawer parity), the rendered
+  // column height (so a shorter column always wins), and a 600px desktop cap so
+  // it stays phone-sized on a large monitor instead of covering most of it.
+  const sheetMaxHeight = Math.min(
+    windowHeight * SHEET_MAX_HEIGHT_RATIO,
+    columnHeight ?? windowHeight,
+    framed ? SHEET_DESKTOP_MAX_HEIGHT : Number.POSITIVE_INFINITY,
+  )
 
   useEffect(() => {
     if (isOpen) {
@@ -352,7 +368,7 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
       onRequestClose={requestClose}
       statusBarTranslucent
     >
-      <View style={styles.root}>
+      <View style={[styles.root, framed && styles.rootFramed]}>
         {/* Backdrop — fades in/out, never slides. */}
         <Animated.View pointerEvents="none" style={[styles.backdrop, backdropStyle]} />
         <Pressable
@@ -364,11 +380,27 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
 
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={styles.drawerContainer}
+          style={[
+            framed ? styles.drawerContainerFramed : styles.drawerContainerFull,
+            // RN Web portals `Modal` to `document.body`, i.e. outside the
+            // framed card. Sizing this box to the measured card height and
+            // centring it (`rootFramed`) lines the sheet's bottom edge up with
+            // the card's bottom edge, so the sheet sits inside the frame
+            // instead of the viewport. Falls back to content height until the
+            // card has been measured.
+            framed && columnHeight != null ? { height: columnHeight } : null,
+          ]}
           pointerEvents="box-none"
         >
           <TouchableWithoutFeedback onPress={() => {}}>
-            <Animated.View style={[styles.drawer, { maxHeight: sheetMaxHeight }, sheetStyle]}>
+            <Animated.View
+              style={[
+                styles.drawer,
+                framed && styles.drawerFramed,
+                { maxHeight: sheetMaxHeight },
+                sheetStyle,
+              ]}
+            >
               <View style={styles.header}>
                 <Text style={styles.title}>💬 Chat</Text>
                 <TouchableOpacity
@@ -472,6 +504,9 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
 
 const styles = StyleSheet.create({
   root: { flex: 1, justifyContent: 'flex-end' },
+  // Framed desktop web: the sheet box (card height) is centred so its bottom
+  // edge matches the card's bottom edge, not the viewport's.
+  rootFramed: { justifyContent: 'center' },
   backdrop: {
     position: 'absolute',
     top: 0,
@@ -480,10 +515,24 @@ const styles = StyleSheet.create({
     bottom: 0,
     backgroundColor: '#000',
   },
-  drawerContainer: { flex: 1, justifyContent: 'flex-end' },
+  drawerContainerFull: { flex: 1, justifyContent: 'flex-end' },
+  // Framed desktop web: keep the sheet aligned with the centred card it belongs
+  // to (the modal portal spans the full viewport width otherwise). The box is
+  // content-sized (its height is set from the measured card) — it must not grow
+  // to fill the viewport, or the sheet would hang below the card.
+  drawerContainerFramed: {
+    flexGrow: 0,
+    flexShrink: 0,
+    flexBasis: 'auto',
+    width: '100%',
+    maxWidth: COLUMN_MAX_WIDTH,
+    alignSelf: 'center',
+    justifyContent: 'flex-end',
+  },
   // Height bound is set inline from the live window size (80%); `flexShrink`
   // lets the list shrink inside the sheet so long chats scroll internally.
   drawer: { backgroundColor: '#1a1a1a', borderTopLeftRadius: 16, borderTopRightRadius: 16 },
+  drawerFramed: { width: '100%' },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#222' },
   title: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
   closeBtn: { padding: 4 },

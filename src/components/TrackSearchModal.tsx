@@ -33,14 +33,18 @@ export function TrackSearchModal({ isOpen, onClose, onTrackSelect }: TrackSearch
   }, [onClose, reset])
 
   const handleTrackSelect = useCallback(
-    (track: any) => {
+    (track: OnDemandTrack) => {
+      // The search field is focused (and the soft keyboard is up) while the user
+      // taps a result. Dismiss it explicitly so the keyboard cannot linger over
+      // the player, and so the tap is unambiguously a "play" intent.
+      Keyboard.dismiss()
       onTrackSelect({ id: track.id, title: track.title, artist: track.artist, duration: track.duration })
     },
     [onTrackSelect],
   )
 
   const renderItem = useCallback(
-    ({ item }: { item: any }) => (
+    ({ item }: { item: OnDemandTrack }) => (
       <TouchableOpacity style={styles.resultItem} onPress={() => handleTrackSelect(item)} activeOpacity={0.7}>
         <View style={styles.resultIcon}>
           <Ionicons name="musical-notes" size={16} color="#888" />
@@ -83,6 +87,15 @@ export function TrackSearchModal({ isOpen, onClose, onTrackSelect }: TrackSearch
           data={tracks}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
+          // CRITICAL: the search TextInput is `autoFocus`, so the soft keyboard is
+          // up for every tap on a result. With the default (`'never'`) RN's
+          // ScrollView eats that first tap in the responder-capture phase
+          // (`_handleStartShouldSetResponderCapture`) and only dismisses the
+          // keyboard — `onPress` never fires, which looked exactly like "tapping a
+          // track produces no sound". `'handled'` lets the row receive the press
+          // while still dismissing the keyboard on taps that miss the rows.
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
           ListEmptyComponent={
             loading ? (
               <ActivityIndicator size="large" color="#ff6b35" style={{ marginTop: 40 }} />
