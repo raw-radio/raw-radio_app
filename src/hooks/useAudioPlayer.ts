@@ -38,6 +38,43 @@ const NOTIFICATION_CAPABILITIES = [
 ]
 
 /**
+ * Builds the COMPLETE `TrackPlayer.updateOptions()` payload for a given
+ * "app killed from recents" behaviour.
+ *
+ * `updateOptions` is NOT a merge: the native side rebuilds the player commands
+ * and the media-session configuration from the payload it receives
+ * (`MusicService.updateOptions`, MusicService.kt:218-262), so a field omitted
+ * from a later call is reset rather than kept. Specifically, the
+ * `capabilities` / `notificationCapabilities` lists fall back to empty (and
+ * `notificationCapabilities` then mirrors `capabilities`),
+ * `android.appKilledPlaybackBehavior` falls back to `ContinuePlayback`,
+ * and `pauseOnInterruption` / `android.shuffle` fall back to `false`. Only a few
+ * keys are read "if present" (`android.audioOffload`, `android.skipSilence`, and
+ * `android.stopForegroundGracePeriod` — MusicService.kt:222-237). This hook
+ * switches `android.appKilledPlaybackBehavior` dynamically (see
+ * `applyAppKilledBehavior`), so every call — including the one at init — must
+ * pass the full set of capabilities. Routing them all through this one builder
+ * is what makes drift between the init call and the later calls impossible.
+ *
+ * Tray disappearing when the app is killed while PAUSED:
+ * `ContinuePlayback` makes `onTaskRemoved` a no-op
+ * (MusicService.kt:750), so the notification would persist forever after a kill
+ * while paused (`stopForegroundGracePeriod` is dead config in this alpha).
+ * `StopPlaybackAndRemoveNotification` is the only removal path, but it tears the
+ * service down and calls `exitProcess(0)` (MusicService.kt:729-747). Hence the
+ * switch is dynamic: playing ⇒ ContinuePlayback (audio survives the kill),
+ * paused ⇒ StopPlaybackAndRemoveNotification (a paused+killed app dies
+ * completely — no notification, next launch is cold).
+ */
+function buildPlayerOptions(appKilledPlaybackBehavior: AppKilledPlaybackBehavior) {
+  return {
+    android: { appKilledPlaybackBehavior },
+    capabilities: NOTIFICATION_CAPABILITIES,
+    notificationCapabilities: NOTIFICATION_CAPABILITIES,
+  }
+}
+
+/**
  * URI of the square 1024×1024 app icon (`assets/icon.png`), used as the
  * tray/lock-screen artwork of the radio stream (tracks have no artwork of their
  * own).
@@ -107,11 +144,35 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   const modeRef = useRef<PlayerMode>('radio')
   const initializedRef = useRef(false)
   const prevVolumeRef = useRef(1)
-  // Resolves once TrackPlayer.setupPlayer() has completed.
+  // Resolves once the init chain — probe, `setupPlayer()`, options, volume
+  // restore, mount seed — has settled. Never rejects (the failure is reported
+  // through `error`/`state` instead), so `await`ing it can never strand a caller.
   const setupPromiseRef = useRef<Promise<void> | null>(null)
   const readyRef = useRef(false)
-  // A play request that arrived before setup completed.
-  const pendingPlayRef = useRef(false)
+  // Android "app killed from recents" behaviour that should be applied to the
+  // native player. `updateOptions` re-derives the options from each payload
+  // (absent fields reset — see `buildPlayerOptions`), so the desired value is
+  // tracked here and re-applied with the full option set every time the
+  // play/pause intent flips.
+  const appKilledBehaviorRef = useRef<AppKilledPlaybackBehavior>(
+    AppKilledPlaybackBehavior.ContinuePlayback,
+  )
+  // Last behaviour actually written to the native player; skips redundant
+  // `updateOptions` round-trips. Only read/written from inside the serialized
+  // write chain (`behaviorWriteChainRef`), so it can never be observed
+  // mid-flight holding the value an older, still-running write is about to
+  // supersede.
+  const appliedKilledBehaviorRef = useRef<AppKilledPlaybackBehavior | null>(null)
+  // Monotonic id of the newest behaviour intent. A queued write that has been
+  // superseded before it starts is dropped instead of landing late.
+  const behaviorRequestRef = useRef(0)
+  // Tail of the serialized native-`updateOptions` write chain. Chaining the
+  // writes — instead of firing them concurrently — is what makes "the last
+  // intent wins" a structural guarantee: while one `updateOptions` round-trip is
+  // in flight, no other one can start (and the dedup in
+  // `applyAppKilledBehavior` can therefore never mistake "in flight" for
+  // "already applied").
+  const behaviorWriteChainRef = useRef<Promise<void>>(Promise.resolve())
   // Latest `playTrack`, so `play()` can restart the current on-demand track
   // (declared later in this hook, but reachable through the ref).
   const playTrackRef = useRef<(track: OnDemandTrack) => Promise<void>>(async () => {})
@@ -150,6 +211,81 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   const buildStreamUrl = useCallback((slug: string) => {
     const base = process.env.EXPO_PUBLIC_API_URL || ''
     return `${base}/${slug}.mp3`
+  }, [])
+
+  /**
+   * Switch `android.appKilledPlaybackBehavior` on the live player — the ONLY
+   * removal path for the media notification (`ContinuePlayback` makes
+   * `onTaskRemoved` a no-op, MusicService.kt:750). Called on every play path
+   * with `ContinuePlayback` and on every pause path with
+   * `StopPlaybackAndRemoveNotification`.
+   *
+   * Best-effort by design (a failed options update must never break playback).
+   * "The last intent wins" is enforced structurally, in three parts:
+   *   1. the desired value is recorded synchronously in
+   *      `appKilledBehaviorRef`, so it is never stale;
+   *   2. writes are serialized through `behaviorWriteChainRef`, so a write can
+   *      never be observed as applied while an older round-trip for the opposite
+   *      value is still in flight (which is exactly what used to let the dedup
+   *      below swallow the newest intent);
+   *   3. `behaviorRequestRef` is a monotonic id, so a write that was superseded
+   *      while queued is dropped instead of landing late.
+   * A failed write clears `appliedKilledBehaviorRef` — the native options are
+   * then unknown, so the next call must re-apply them.
+   *
+   * Safe to call before `setupPlayer()` resolves: the chain awaits
+   * `setupPromiseRef` and re-checks the id afterwards. If the promise is still
+   * null, the init effect has not published it yet, which also means its own
+   * `updateOptions` (which reads `appKilledBehaviorRef.current`) has not run —
+   * so the intent recorded here is picked up there instead of being lost.
+   *
+   * The payload is always the FULL option set from `buildPlayerOptions`, never a
+   * partial one.
+   */
+  const applyAppKilledBehavior = useCallback((behavior: AppKilledPlaybackBehavior) => {
+    // Record the desired value synchronously: the native write may be skipped
+    // by the dedup/id checks below, but the intent must never be stale.
+    appKilledBehaviorRef.current = behavior
+    const requestId = ++behaviorRequestRef.current
+
+    const write = async () => {
+      // Superseded while queued behind an earlier write — the newest intent
+      // writes instead.
+      if (requestId !== behaviorRequestRef.current) return
+
+      const setup = setupPromiseRef.current
+      if (!setup) {
+        // The init effect has not published its promise yet (its `updateOptions`
+        // has not run either), so it will apply the intent recorded above.
+        return
+      }
+      try {
+        await setup
+      } catch {
+        // Init failed and reported it — there is no player to configure.
+        return
+      }
+
+      // Re-check after the await: a newer intent may have arrived meanwhile.
+      if (requestId !== behaviorRequestRef.current) return
+
+      const desired = appKilledBehaviorRef.current
+      if (appliedKilledBehaviorRef.current === desired) return
+
+      try {
+        await TrackPlayer.updateOptions(buildPlayerOptions(desired))
+        appliedKilledBehaviorRef.current = desired
+      } catch {
+        // Best-effort — never let a notification-behaviour failure surface. The
+        // native options are now unknown, so force the next call to re-apply.
+        appliedKilledBehaviorRef.current = null
+      }
+    }
+
+    // `write` never rejects (every await is guarded), but chaining the rejection
+    // handler too keeps a future edit from breaking the chain for good.
+    behaviorWriteChainRef.current = behaviorWriteChainRef.current.then(write, write)
+    return behaviorWriteChainRef.current
   }, [])
 
   // Sync modeRef
@@ -235,12 +371,19 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     const subscriptions = [
       TrackPlayer.addEventListener(Event.RemotePause, () => {
         isPlayingRef.current = false
+        // Cancel any in-flight load: `tryPlay` / `playTrack` await the setup
+        // promise before they start audio, and a notification pause issued in
+        // that window must not be overwritten by the load they resume with (see
+        // `playRequestRef`).
+        playRequestRef.current += 1
         // Mirror the intent into the state the slug-change effect also consults
         // (see `intendsToPlay`): the native transport is async, and a station
         // switch issued in the same tick must not read the still-stale `Playing`
         // and start audio the user just paused.
         playbackStateRef.current = TrackPlayerState.Paused
         setState('paused')
+        // Paused: the tray must not outlive a kill (see `applyAppKilledBehavior`).
+        void applyAppKilledBehavior(AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification)
       }),
       TrackPlayer.addEventListener(Event.RemotePlay, () => {
         isPlayingRef.current = true
@@ -251,105 +394,212 @@ export function useAudioPlayer(currentSlug: string | undefined) {
         // baseline while `playbackStateRef` is already Playing and force a full
         // reset/add/play reconnect — an offline-UI flash for a normal resume.
         lastProgressAtRef.current = Date.now()
+        // Playing: the stream must survive a kill (see `applyAppKilledBehavior`).
+        void applyAppKilledBehavior(AppKilledPlaybackBehavior.ContinuePlayback)
       }),
       TrackPlayer.addEventListener(Event.RemoteStop, () => {
         isPlayingRef.current = false
+        // Same in-flight-load cancellation as RemotePause above.
+        playRequestRef.current += 1
         // Same synchronous mirror as RemotePause above.
         playbackStateRef.current = TrackPlayerState.Stopped
         setState('paused')
+        // Stopped: same kill-time semantics as a pause.
+        void applyAppKilledBehavior(AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification)
       }),
     ]
 
     return () => subscriptions.forEach((subscription) => subscription.remove())
-  }, [])
+  }, [applyAppKilledBehavior])
 
-  // Initialize TrackPlayer once
+  // Initialize TrackPlayer once.
+  //
+  // `setupPlayer()` is NOT idempotent. With `ContinuePlayback` the Android
+  // playback service (and its process, React instance and TurboModule) survives
+  // the app being swiped from recents, so after a relaunch `isServiceBound` is
+  // already true and `setupPlayer()` rejects with `player_already_initialized`
+  // (MusicModule.kt:191-198). A chain that `await`s it therefore never reached
+  // `readyRef = true`, which silently dropped every station switch. Hence the
+  // init below probes first AND wraps the `setupPlayer()` call itself, so the
+  // "already bound" rejection can never short-circuit the rest of the work.
+  //
+  // Everything is guarded by `cancelled`: these native calls outlive the
+  // component and a dead instance must not keep writing native state or its own
+  // refs (and must not issue a second `setupPlayer()`).
   useEffect(() => {
     if (initializedRef.current) return
     initializedRef.current = true
 
-    const setupPromise = TrackPlayer.setupPlayer()
-      .then(async () => {
-        // Notification / lock-screen controls. The advertised capabilities
-        // mirror the events handled by src/services/trackPlayerService.ts
-        // exactly: Play/Pause, Stop and SkipToNext/SkipToPrevious
-        // (RemoteNext/RemotePrevious). `notificationCapabilities` is the v5
-        // replacement for the v3 `compactCapabilities`. `ContinuePlayback`
-        // keeps the radio alive when the app is swiped from recents.
-        await TrackPlayer.updateOptions({
-          android: {
-            appKilledPlaybackBehavior: AppKilledPlaybackBehavior.ContinuePlayback,
-          },
-          capabilities: NOTIFICATION_CAPABILITIES,
-          notificationCapabilities: NOTIFICATION_CAPABILITIES,
-        }).catch(() => {
-          // Best-effort: a failed updateOptions must not block playback setup.
-        })
+    // Set by the cleanup below. The awaits themselves cannot be aborted, so
+    // every continuation past an await re-checks this before touching anything.
+    let cancelled = false
 
+    const setupPromise = (async () => {
+      // Probe `getPlaybackState()`: it rejects with `player_not_initialized`
+      // when THIS module instance has not bound the playback service yet —
+      // Android: MusicModule.kt:542-545 calls `verifyServiceBoundOrReject`
+      // (MusicModule.kt:100-110); iOS: TrackPlayer.swift:650-653 calls
+      // `rejectWhenNotInitialized` (TrackPlayer.swift:86-92) — and resolves with
+      // the state bundle once it has. A rejection therefore means "this JS
+      // instance is not bound yet", NOT "the native player is uninitialized":
+      // with `ContinuePlayback` the service — and the player it already set up —
+      // can outlive the app, so the bind may complete between this probe and the
+      // `setupPlayer()` call below, and `setupPlayer()` then rejects with
+      // `player_already_initialized`. The probe cannot hang: the Android check is
+      // synchronous inside `launchInScope` (MusicModule.kt:566-570) and either
+      // rejects or reads the live player, so it always settles. It is
+      // deliberately NOT matched on the error message string.
+      let alreadyInitialized = false
+      try {
+        await TrackPlayer.getPlaybackState()
+        alreadyInitialized = true
+      } catch {
+        alreadyInitialized = false
+      }
+      if (cancelled) return
+
+      if (!alreadyInitialized) {
+        // Fresh process: the only call that may bind the service.
+        try {
+          await TrackPlayer.setupPlayer()
+        } catch (err) {
+          // `setupPlayer()` rejects BOTH for a genuine bind failure and for the
+          // lost race described above (`player_already_initialized`). Probe
+          // again: a resolving player means it was the race, so initialization
+          // must continue; only a second rejection proves the player really is
+          // unavailable, and then the error is propagated.
+          try {
+            await TrackPlayer.getPlaybackState()
+          } catch {
+            throw err
+          }
+        }
+        if (cancelled) return
+      }
+
+      // Everything below runs on BOTH paths. That is guaranteed by the
+      // `try/catch` around `setupPlayer()` above (not by the probe alone): the
+      // only ways out of this IIFE before `readyRef = true` are a setup failure
+      // that a second probe confirmed is real, or the component unmounting
+      // (`cancelled`), where a dead instance has nothing left to set up.
+
+      // Notification / lock-screen controls. The advertised capabilities mirror
+      // the events handled by src/services/trackPlayerService.ts exactly:
+      // Play/Pause, Stop and SkipToNext/SkipToPrevious (RemoteNext/
+      // RemotePrevious). `notificationCapabilities` is the v5 replacement for
+      // the v3 `compactCapabilities`.
+      try {
+        const behavior = appKilledBehaviorRef.current
+        await TrackPlayer.updateOptions(buildPlayerOptions(behavior))
+        appliedKilledBehaviorRef.current = behavior
+      } catch {
+        // Best-effort: a failed updateOptions must not block playback setup.
+      }
+      if (cancelled) return
+
+      try {
         const savedVol = await storage.getItem(STORAGE_KEYS.VOLUME)
+        if (cancelled) return
         const savedMuted = await storage.getItem(STORAGE_KEYS.MUTED)
+        if (cancelled) return
         if (savedVol !== null) {
           const v = parseFloat(savedVol)
           if (!isNaN(v) && v >= 0 && v <= 1) {
             setVolumeState(v)
             await TrackPlayer.setVolume(v)
+            if (cancelled) return
             prevVolumeRef.current = v
           }
         }
         if (savedMuted === 'true') {
           setMuted(true)
           await TrackPlayer.setVolume(0)
+          if (cancelled) return
         }
-      })
-      .then(async () => {
-        readyRef.current = true
+      } catch {
+        // Best-effort: a failed volume restore must not block playback setup.
+      }
+      if (cancelled) return
 
-        // Seed "the app intends to play" from the player itself.
-        //
-        // This JS instance starts with no memory of a session that outlived it:
-        // with `AppKilledPlaybackBehavior.ContinuePlayback` the Android playback
-        // service keeps streaming after the app is swiped away, so on relaunch
-        // RNTP can be Playing while `isPlayingRef` is still false (and the
-        // `usePlaybackState()` subscription alone already makes the UI render
-        // "playing"). Without this seed a station switch was silently dropped
-        // (see the slug-change effect) and the stall watchdog / reconnect chain
-        // stayed disarmed for the whole session.
-        try {
-          const playback = await TrackPlayer.getPlaybackState()
+      readyRef.current = true
+
+      // Seed the JS-side bookkeeping from the native player itself.
+      //
+      // This JS instance starts with no memory of a session that outlived it:
+      // with `AppKilledPlaybackBehavior.ContinuePlayback` the Android playback
+      // service keeps the player alive after the app is swiped away, so on
+      // relaunch RNTP can already be Playing (or Paused) while `isPlayingRef` is
+      // still false. Without the seed a station switch was silently dropped (see
+      // the slug-change effect) and the stall watchdog / reconnect chain stayed
+      // disarmed for the whole session.
+      try {
+        const playback = await TrackPlayer.getPlaybackState()
+        if (cancelled) return
+        // `hasQueueRef` / `currentUrlRef` are restored REGARDLESS of the
+        // playback state: a paused session still owns a queue with a loaded URL,
+        // and the tray now-playing must still be able to publish after a
+        // relaunch onto it (otherwise it stays stuck on the fallback title).
+        const [active, activeIndex] = await Promise.all([
+          TrackPlayer.getActiveTrack(),
+          TrackPlayer.getActiveTrackIndex(),
+        ])
+        if (cancelled) return
+        if (activeIndex !== undefined || active?.url) hasQueueRef.current = true
+        // Record which stream is already loaded: the persisted station slug
+        // commonly resolves a few ms after the mount, and if it points at the
+        // stream that is already on air, re-loading it would be a pointless
+        // (and audible) teardown.
+        if (active?.url) currentUrlRef.current = active.url
+
+        // Arm the JS-side "intent" ONLY when no explicit play/pause intent has
+        // been registered while this seed was in flight. Otherwise a user action
+        // taken during a cold start (play tapped before the probe finished, or a
+        // notification pause during a relaunch) would be clobbered by the
+        // inherited state. `behaviorRequestRef` is the marker for "an explicit
+        // intent already happened" — every `applyAppKilledBehavior` call bumps
+        // it — and once the user has spoken, the inherited native state must not
+        // be allowed to arm anything on their behalf.
+        if (behaviorRequestRef.current === 0) {
           if (
             modeRef.current === 'radio' &&
             (playback.state === TrackPlayerState.Playing ||
               playback.state === TrackPlayerState.Buffering)
           ) {
+            // `isPlayingRef` is armed ONLY for an actually-playing session — a
+            // paused/idle player must never look like "the user intends to
+            // play", or a mount would auto-start audio.
             isPlayingRef.current = true
-            // Something is playing, so a queue provably exists — let the tray
-            // metadata update instead of leaving the notification on the
-            // fallback title published by the previous session.
-            hasQueueRef.current = true
-            // Record which stream is already loaded: the persisted station slug
-            // commonly resolves a few ms after the mount, and if it points at the
-            // stream that is already on air, re-loading it would be a pointless
-            // (and audible) teardown.
-            const active = await TrackPlayer.getActiveTrack()
-            if (active?.url) currentUrlRef.current = active.url
+          } else if (modeRef.current === 'radio' && playback.state === TrackPlayerState.Paused) {
+            // The session this JS instance inherited is paused: arm the
+            // kill-time notification removal for it. Fire-and-forget —
+            // `applyAppKilledBehavior` chains on `setupPromiseRef`, which is
+            // this very promise, so awaiting it here would deadlock.
+            void applyAppKilledBehavior(
+              AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification,
+            )
           }
-        } catch {
-          // Best-effort: a failed state probe must not block setup.
         }
-
-        // Flush a play request that raced with setup (see slug-change effect).
-        // `pendingPlayRef` is only ever set after `intendsToPlay()` said yes, and
-        // `isPlayingRef` is checked again here so a pause issued while setup was
-        // still resolving cancels the deferred start.
-        if (pendingPlayRef.current && isPlayingRef.current) {
-          pendingPlayRef.current = false
-          void tryPlay(buildStreamUrl(savedSlugRef.current))
-        }
-      })
-      .catch(() => {})
+      } catch {
+        // Best-effort: a failed state probe must not block setup.
+      }
+    })().catch((err: unknown) => {
+      // A genuine failure (native player unavailable) is surfaced instead of
+      // silently leaving the hook permanently un-ready. Note the deliberate
+      // asymmetry: the "service already bound" case above is handled, not
+      // caught. Nothing is reported for a cancelled run — the instance is gone.
+      if (cancelled) return
+      setError(err instanceof Error ? err.message : 'Player initialization error')
+      setState('error')
+    })
     setupPromiseRef.current = setupPromise
 
     return () => {
+      // The in-flight init must not keep writing native state or this (dead)
+      // instance's refs. In particular a remount would otherwise race a second
+      // `setupPlayer()` against this one, and `MusicModule.playerSetUpPromise`
+      // (MusicModule.kt:202) is a single field: the loser's promise is
+      // overwritten and may never settle.
+      cancelled = true
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -398,6 +648,10 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     async (url: string) => {
       // Invalidate any in-flight request: this one is now the newest.
       const requestId = ++playRequestRef.current
+      // Playing intent: a kill must not stop the stream (see
+      // `applyAppKilledBehavior`). Covers `play()`, `stopTrack()`, the retry
+      // timer and the slug-change effect, which all funnel through here.
+      void applyAppKilledBehavior(AppKilledPlaybackBehavior.ContinuePlayback)
       try {
         // Never touch TrackPlayer before setupPlayer() resolves.
         if (setupPromiseRef.current) await setupPromiseRef.current
@@ -435,7 +689,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
         setState('error')
       }
     },
-    [publishNowPlaying],
+    [publishNowPlaying, applyAppKilledBehavior],
   )
 
   const play = useCallback(async () => {
@@ -464,6 +718,13 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       clearTimeout(retryTimerRef.current)
       retryTimerRef.current = null
     }
+    // Cancel any in-flight load. `tryPlay()` waits for `setupPlayer()` before it
+    // resets/adds/plays, and `playTrack()` does the same; without this bump a
+    // pause issued during that window was overwritten by the resumed load (which
+    // re-armed `isPlayingRef` and started audio). The old deferred-play flush
+    // re-checked `isPlayingRef` for exactly this reason — the `requestId` guards
+    // already present in `tryPlay`/`playTrack` are the equivalent here.
+    playRequestRef.current += 1
     isPlayingRef.current = false
     // Mirror the intent synchronously into the state the slug-change effect also
     // consults (see `intendsToPlay`): `TrackPlayer.pause()` and its
@@ -471,9 +732,12 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     // must not read the still-stale `Playing` and auto-start audio the user just
     // paused.
     playbackStateRef.current = TrackPlayerState.Paused
+    // Paused: killing the app must remove the tray instead of leaving a dead
+    // notification behind (see `applyAppKilledBehavior`).
+    void applyAppKilledBehavior(AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification)
     await TrackPlayer.pause()
     setState('paused')
-  }, [])
+  }, [applyAppKilledBehavior])
 
   const toggle = useCallback(async () => {
     if (state === 'playing' || state === 'loading' || state === 'buffering' || state === 'reconnecting') {
@@ -507,8 +771,8 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     savedSlugRef.current = currentSlug || 'main'
     setCurrentTrack(track)
     setState('loading')
-    // The track supersedes any radio play that was queued while setup ran.
-    pendingPlayRef.current = false
+    // Playing intent: a kill must not stop the on-demand track either.
+    void applyAppKilledBehavior(AppKilledPlaybackBehavior.ContinuePlayback)
 
     const url = getTrackStreamUrl(track.id)
     currentUrlRef.current = url
@@ -544,7 +808,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       setError(err.message || 'Track playback error')
       setState('error')
     }
-  }, [currentSlug])
+  }, [currentSlug, applyAppKilledBehavior])
 
   // Publish the current `playTrack` to `play()` (declared earlier).
   playTrackRef.current = playTrack
@@ -702,7 +966,11 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   //   shape that works when the switch is a hot one (no pause in between).
   // - A real change while the player is intentionally paused/idle only records
   //   the new URL, so the next `play()` starts the newly selected station.
-  // - If setup hasn't resolved yet, the switch is deferred via `pendingPlayRef`.
+  // - No `readyRef` gate here: `tryPlay` already awaits `setupPromiseRef`, so a
+  //   switch issued before setup resolves is queued behind it instead of being
+  //   silently dropped (the old `pendingPlayRef` deferral only ever flushed from
+  //   the init chain and turned the "already initialized" rejection into a
+  //   permanent, invisible loss of every station switch).
   useEffect(() => {
     if (modeRef.current === 'track') return
 
@@ -727,11 +995,8 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     // persisted slug after the mount would re-load the very stream that is on air.
     if (currentUrlRef.current === url) return
 
-    if (readyRef.current) {
-      void tryPlay(url)
-    } else {
-      pendingPlayRef.current = true
-    }
+    // `tryPlay` awaits setup itself, so no pre-setup deferral is needed.
+    void tryPlay(url)
   }, [currentSlug, buildStreamUrl, tryPlay, intendsToPlay])
 
   return {
