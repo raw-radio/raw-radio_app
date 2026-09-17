@@ -1,10 +1,19 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { storage, STORAGE_KEYS } from './useStorage'
 import { getTrackStreamUrl } from '../api/client'
+import { sanitizeMediaText } from '../utils/format'
 import type { PlayerState, PlayerMode, OnDemandTrack, NowPlayingMeta } from '../types'
 
 const MAX_RETRY_DELAY = 30000
-const BUFFERING_TIMEOUT = 10_000
+const RETRY_BASE_DELAY = 2000
+const RECONNECT_AFTER_ATTEMPTS = 3
+// Watchdog cadence and the "no audio progress" threshold. The threshold spans a
+// few ticks on purpose: a normal, short rebuffer must never trigger a reload.
+const WATCHDOG_INTERVAL = 5000
+const STALL_TIMEOUT = 15000
+// Grace before a `stalled`/`suspend` signal is allowed to consult the watchdog
+// (both events are frequently benign for a live stream).
+const STALL_SIGNAL_GRACE = 3000
 
 export interface TrackProgress {
   currentTime: number
@@ -49,6 +58,27 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   // registered once and must not capture stale closures.
   const playRef = useRef<() => void>(() => {})
   const pauseRef = useRef<() => void>(() => {})
+  // Latest `playTrack`, so `play()` can restart the current on-demand track
+  // (declared later in this hook, but reachable through the ref).
+  const playTrackRef = useRef<(track: OnDemandTrack) => void>(() => {})
+
+  // --- Watchdog state -------------------------------------------------------
+  // Timestamp of the last *observable* playback progress (`timeupdate` /
+  // `playing`). A live stream that keeps advancing `currentTime` keeps this
+  // fresh; a dead-but-open connection does not. The watchdog exists because the
+  // old code only retried while `state === 'error'`, which a silent stall never
+  // produced (see `scheduleRecovery`/`maybeRecover`).
+  const lastProgressAtRef = useRef(Date.now())
+  // When the tab was hidden. Timers and media events are throttled in background
+  // tabs, so that gap is discounted on return instead of being read as a stall.
+  const hiddenAtRef = useRef(0)
+  // Delayed check scheduled by a `stalled`/`suspend` signal.
+  const stallProbeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Latest watchdog callbacks. `initAudio` registers its listeners exactly once,
+  // so it must reach the current closures through these refs (same reasoning as
+  // `playRef`/`pauseRef` above).
+  const scheduleRecoveryRef = useRef<() => void>(() => {})
+  const maybeRecoverRef = useRef<() => void>(() => {})
 
   const buildStreamUrl = useCallback((s: string) => {
     const base = process.env.EXPO_PUBLIC_API_URL || ''
@@ -69,6 +99,10 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current)
       retryTimerRef.current = null
+    }
+    if (stallProbeTimerRef.current) {
+      clearTimeout(stallProbeTimerRef.current)
+      stallProbeTimerRef.current = null
     }
     if (audioRef.current) {
       audioRef.current.pause()
@@ -99,6 +133,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       setState('playing')
       setError(null)
       retryCountRef.current = 0
+      lastProgressAtRef.current = Date.now()
     })
 
     audio.addEventListener('pause', () => {
@@ -112,6 +147,10 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     })
 
     audio.addEventListener('timeupdate', () => {
+      // Any `timeupdate` means the stream is really advancing — this is the
+      // watchdog's "audio progressed" heartbeat (track mode included, though the
+      // watchdog itself stays out of track mode).
+      lastProgressAtRef.current = Date.now()
       if (modeRef.current === 'track') {
         setTrackProgress({
           currentTime: audio.currentTime,
@@ -119,6 +158,20 @@ export function useAudioPlayer(currentSlug: string | undefined) {
         })
       }
     })
+
+    // `stalled` = the browser stopped receiving data; `suspend` = it stopped
+    // fetching (frequently benign for a live stream). Neither guarantees an
+    // `error`, so after a short grace period they feed the SAME watchdog
+    // decision instead of forking their own recovery.
+    const handleStallSignal = () => {
+      if (stallProbeTimerRef.current) clearTimeout(stallProbeTimerRef.current)
+      stallProbeTimerRef.current = setTimeout(() => {
+        stallProbeTimerRef.current = null
+        maybeRecoverRef.current()
+      }, STALL_SIGNAL_GRACE)
+    }
+    audio.addEventListener('stalled', handleStallSignal)
+    audio.addEventListener('suspend', handleStallSignal)
 
     audio.addEventListener('ended', () => {
       if (modeRef.current === 'track') {
@@ -152,6 +205,9 @@ export function useAudioPlayer(currentSlug: string | undefined) {
 
       setError(msg)
       setState('error')
+      // The retry chain is armed from the failure itself, never from an effect
+      // that watches `state` — that indirection is what used to lose retries.
+      scheduleRecoveryRef.current()
     })
 
     audioRef.current = audio
@@ -161,8 +217,18 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     const audio = audioRef.current
     if (!audio) return
 
+    // Only the newest arm may stay live. A backoff timer scheduled earlier (and
+    // now superseded by a user tap or the watchdog) must not fire a duplicate
+    // reload seconds later.
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = null
+    }
+
     currentUrlRef.current = url
     isPlayingRef.current = true
+    // A fresh attempt gets a full stall budget before the watchdog may judge it.
+    lastProgressAtRef.current = Date.now()
     setState('loading')
 
     // Cache-bust stream URL to bypass browser Media Cache on retry/reconnect
@@ -170,16 +236,95 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     audio.src = `${url}${separator}_cb=${Date.now()}`
     audio.play().catch((err: any) => {
       if (err?.name === 'NotAllowedError') {
-        // Autoplay blocked — wait for the user gesture / visibility resume.
-        // Do not enter error state, otherwise the reconnect loop spins forever.
+        // Autoplay was blocked by the browser. Retrying in a loop cannot
+        // succeed (there is no user activation yet) and used to leave the player
+        // wedged in 'loading' forever: the buffering safety net only watched
+        // `state === 'buffering'`. Report an honest, recoverable state instead —
+        // the UI shows the play button and the user's next tap re-invokes play().
+        isPlayingRef.current = false
+        setState('paused')
         return
       }
       if (err?.name !== 'AbortError') {
         setError(err?.message || 'Playback error')
         setState('error')
+        scheduleRecoveryRef.current()
       }
     })
   }, [])
+
+  /**
+   * Arm the recovery path for the RADIO stream: the `error` event, a rejected
+   * `play()`, a `stalled`/`suspend` signal and the watchdog all funnel here.
+   *
+   * Scope — radio mode only. It bails while `modeRef.current === 'track'`, so an
+   * on-demand track has NO automatic recovery: a rejected `playTrack` only sets
+   * `error`. That is deliberate — a timer retrying a permanently broken file
+   * would loop forever — and the UI provides an explicit retry instead: `play()`
+   * restarts the current track in track mode (see `play` below).
+   *
+   * It is deliberately independent of `state`. The previous implementation
+   * retried only while `state === 'error'`, so any dead end that did not produce
+   * exactly that state — a stall with no event at all, a rejected autoplay stuck
+   * in 'loading', or the 'reconnecting' state that the effect itself set — never
+   * re-armed and the player went silent until a page reload.
+   *
+   * Backoff widens the delay but never disables retries: the counter only feeds
+   * the exponent, and every failure arms the next attempt.
+   */
+  const scheduleRecovery = useCallback(() => {
+    if (modeRef.current === 'track') return
+    if (!isPlayingRef.current) return
+    if (retryTimerRef.current) return
+    if (document.hidden) return
+
+    const exponent = Math.min(retryCountRef.current, 5)
+    const delay = Math.min(RETRY_BASE_DELAY * 2 ** exponent, MAX_RETRY_DELAY)
+    retryCountRef.current += 1
+
+    // Escalation is a UI label only; the chain above is already armed and every
+    // subsequent failure re-arms it (see tryPlay/error/stalled/watchdog).
+    if (retryCountRef.current > RECONNECT_AFTER_ATTEMPTS) {
+      setState('reconnecting')
+    }
+
+    retryTimerRef.current = setTimeout(() => {
+      retryTimerRef.current = null
+      if (modeRef.current === 'track' || !isPlayingRef.current) return
+      tryPlay(buildStreamUrl(savedSlugRef.current))
+    }, delay)
+  }, [tryPlay, buildStreamUrl])
+
+  /**
+   * The watchdog's decision, also fed by `stalled`/`suspend` after a grace
+   * period. The invariant it protects: while the user intends to play, keep
+   * trying until audio actually advances.
+   *
+   *   - `audio.paused` with `isPlayingRef.current === true` is always a dead end
+   *     (an intended pause sets `isPlayingRef` false);
+   *   - otherwise, no `timeupdate`/`playing` for longer than `STALL_TIMEOUT`
+   *     means the bytes stopped flowing without an `error` event.
+   *
+   * No-op while paused on purpose (`isPlayingRef === false`), in on-demand track
+   * mode, or while the tab is hidden.
+   */
+  const maybeRecover = useCallback(() => {
+    if (modeRef.current === 'track') return
+    if (!isPlayingRef.current) return
+    if (document.hidden) return
+
+    const audio = audioRef.current
+    if (!audio) return
+
+    const noProgressFor = Date.now() - lastProgressAtRef.current
+    if (!audio.paused && noProgressFor <= STALL_TIMEOUT) return
+
+    scheduleRecovery()
+  }, [scheduleRecovery])
+
+  // Publish the current closures to the once-registered audio listeners/watchdog.
+  scheduleRecoveryRef.current = scheduleRecovery
+  maybeRecoverRef.current = maybeRecover
 
   // Init on mount, cleanup on unmount
   useEffect(() => {
@@ -230,30 +375,65 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   }, [slug, cleanupAudio, initAudio, tryPlay, buildStreamUrl])
 
   // Resume on tab focus (Telegram WebView / mobile browsers pause on background)
+  // and re-run the watchdog on return. Background tabs throttle timers and media
+  // events, so the hidden interval is discounted before judging progress; this
+  // also recovers a stream that went silent while the tab was hidden.
   useEffect(() => {
     const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        const audio = audioRef.current
-        if (audio && isPlayingRef.current && audio.paused) {
-          audio.play().catch((err: any) => {
-            if (err?.name !== 'AbortError') {
-              console.warn('Resume playback failed:', err)
-            }
-          })
-        }
+      if (document.visibilityState !== 'visible') {
+        hiddenAtRef.current = Date.now()
+        return
+      }
+
+      // Re-base the progress clock across the hidden gap so the throttled
+      // interval is neither a false stall nor a false healthy signal:
+      //   - if ANY progress event arrived while hidden, trust it and restart the
+      //     baseline at "now" (a live stream keeps advancing even in background);
+      //   - if NONE did, treat the moment of hiding as the last progress, so the
+      //     watchdog recovers immediately on return instead of waiting another
+      //     full threshold.
+      if (hiddenAtRef.current) {
+        lastProgressAtRef.current =
+          lastProgressAtRef.current >= hiddenAtRef.current ? Date.now() : hiddenAtRef.current
+        hiddenAtRef.current = 0
+      }
+
+      if (modeRef.current === 'track' || !isPlayingRef.current) return
+      const audio = audioRef.current
+      if (!audio) return
+
+      if (audio.paused) {
+        // Re-arm through the shared path: it handles NotAllowedError honestly
+        // and gives a fresh cache-buster, unlike a bare `audio.play()`.
+        tryPlay(buildStreamUrl(savedSlugRef.current))
+      } else {
+        // Not paused but possibly silent — let the watchdog decide.
+        maybeRecoverRef.current()
       }
     }
 
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
-  }, [])
+  }, [tryPlay, buildStreamUrl])
 
   const play = useCallback(() => {
     if (!audioRef.current) return
     retryCountRef.current = 0
     setError(null)
+
+    // In on-demand mode `play` must restart the CURRENT track, not the radio
+    // stream: `mode`/`currentTrack` — and the PlayerBar + Media Session metadata
+    // — still describe the track, so starting radio underneath them would leave
+    // the UI/tray describing a track while radio audio plays. It is also the
+    // user-facing recovery for a failed track load (`playTrack` reports `error`
+    // without arming an automatic retry).
+    if (modeRef.current === 'track' && currentTrack) {
+      playTrackRef.current(currentTrack)
+      return
+    }
+
     tryPlay(buildStreamUrl(savedSlugRef.current))
-  }, [tryPlay, buildStreamUrl])
+  }, [tryPlay, buildStreamUrl, currentTrack])
 
   const pause = useCallback(() => {
     if (retryTimerRef.current) {
@@ -308,7 +488,12 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       setState('loading')
       audio.src = url
       audio.play().catch((err: any) => {
-        if (err?.name === 'NotAllowedError') return
+        if (err?.name === 'NotAllowedError') {
+          // Same honesty as `tryPlay`: never linger in 'loading' with no retry.
+          isPlayingRef.current = false
+          setState('paused')
+          return
+        }
         if (err?.name !== 'AbortError') {
           setError(err?.message || 'Track playback error')
           setState('error')
@@ -317,6 +502,9 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     },
     [slug],
   )
+
+  // Publish the current `playTrack` to `play()` (declared earlier).
+  playTrackRef.current = playTrack
 
   const stopTrack = useCallback(() => {
     setMode('radio')
@@ -370,10 +558,14 @@ export function useAudioPlayer(currentSlug: string | undefined) {
    * interrupt playback.
    */
   const setNowPlaying = useCallback((meta: NowPlayingMeta) => {
+    // `trackTitle`/`trackArtist` arrive over the WebSocket (untrusted): strip
+    // control characters and cap the length before they reach the Media Session.
+    // `null` is preserved so the render effect below keeps applying its existing
+    // 'RAW Radio' / 'Listen Live' fallbacks and the dedup stays intact.
+    const title = sanitizeMediaText(meta.title)
+    const artist = sanitizeMediaText(meta.artist)
     setNowPlayingState((prev) =>
-      prev.title === (meta.title ?? null) && prev.artist === (meta.artist ?? null)
-        ? prev
-        : { title: meta.title ?? null, artist: meta.artist ?? null },
+      prev.title === title && prev.artist === artist ? prev : { title, artist },
     )
   }, [])
 
@@ -439,30 +631,22 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     }
   }, [])
 
-  // Infinite reconnect with exponential backoff (radio mode only)
+  // Real watchdog (radio mode): while the user intends to play, keep trying
+  // until audio actually progresses. This replaces the old `state === 'error'`
+  // retry effect and the buffering-only safety net — together they left holes
+  // ('loading', 'reconnecting', and any stall that fired no event at all were
+  // unrecoverable). Recovery is now driven by observed progress, not by state.
+  //
+  // `scheduleRecovery`/`maybeRecover` themselves bail while paused on purpose,
+  // in track mode, or when the tab is hidden (browsers throttle timers there;
+  // the visibilitychange handler re-runs the check on return).
   useEffect(() => {
-    if (modeRef.current === 'track') return
-
-    if (state === 'error' && isPlayingRef.current) {
-      const delay = Math.min(2000 * Math.pow(2, retryCountRef.current), MAX_RETRY_DELAY)
-      retryCountRef.current += 1
-
-      retryTimerRef.current = setTimeout(() => {
-        tryPlay(buildStreamUrl(savedSlugRef.current))
-      }, delay)
-
-      if (retryCountRef.current > 3) {
-        setState('reconnecting')
-      }
-    }
-  }, [state, tryPlay, buildStreamUrl])
-
-  // Safety net: buffering for too long escalates to error -> reconnect
-  useEffect(() => {
-    if (state !== 'buffering' || modeRef.current === 'track') return
-    const timer = setTimeout(() => setState('error'), BUFFERING_TIMEOUT)
-    return () => clearTimeout(timer)
-  }, [state])
+    const id = setInterval(() => {
+      if (document.hidden) return
+      maybeRecoverRef.current()
+    }, WATCHDOG_INTERVAL)
+    return () => clearInterval(id)
+  }, [])
 
   return {
     play,

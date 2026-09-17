@@ -1,5 +1,13 @@
 import React, { useState, useCallback, useEffect } from 'react'
-import { Linking, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import {
+  ActivityIndicator,
+  Linking,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native'
 import Animated, {
   cancelAnimation,
   Easing as ReanimatedEasing,
@@ -12,6 +20,12 @@ import Animated, {
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
+import { ANDROID_APP_DOWNLOAD_URL } from '../src/constants/androidAppDownload'
+import {
+  checkForUpdate,
+  cleanupUpdateArtifacts,
+  downloadAndInstall,
+} from '../src/services/appUpdate'
 import { useAudioPlayer } from '../src/hooks/useAudioPlayer'
 import { useStreamStatus } from '../src/hooks/useStreamStatus'
 import { useSubstations } from '../src/hooks/useSubstations'
@@ -25,7 +39,8 @@ import { TrackSearchModal } from '../src/components/TrackSearchModal'
 import { PlayerBar } from '../src/components/PlayerBar'
 import { ChatSheet } from '../src/components/ChatSheet'
 import { ShareButton } from '../src/components/ShareButton'
-import type { OnDemandTrack } from '../src/types'
+import { APP_SURFACE_BG } from '../src/utils/layout'
+import type { AppUpdateInfo, OnDemandTrack } from '../src/types'
 
 /** Connection dot colors, mirrored from `.connection-dot--*` in player.scss. */
 const DOT_CONNECTED = '#2bc96d'
@@ -40,18 +55,6 @@ const DOT_PULSE_HALF_MS = 2000
 const DOT_PULSE_MIN_OPACITY = 0.2
 
 const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' })
-
-/**
- * Android APK download — the stable GitHub "latest release" asset URL.
- *
- * The asset NAME (`raw-radio-universal.apk`) is load-bearing: the link resolves
- * to whatever release is currently tagged `latest`, but the file inside it must
- * keep this exact name. Renaming the artifact in a future release breaks this
- * button. Only rendered on web (see `Platform.OS === 'web'` guard below) —
- * users on Android/iOS already run the app.
- */
-const ANDROID_APP_DOWNLOAD_URL =
-  'https://github.com/raw-radio/raw-radio_app/releases/latest/download/raw-radio-universal.apk'
 
 export default function HomeScreen() {
   const router = useRouter()
@@ -81,6 +84,9 @@ export default function HomeScreen() {
 
   const [searchOpen, setSearchOpen] = useState(false)
   const [chatVisible, setChatVisible] = useState(false)
+  /** Non-null only on Android when GitHub Releases has a newer build. */
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null)
+  const [updateBusy, setUpdateBusy] = useState(false)
 
   const reducedMotion = useReducedMotion()
   /** 0 → 1 → 0 breath, driven by a single shared value (Reanimated, UI thread). */
@@ -94,12 +100,46 @@ export default function HomeScreen() {
   }, [chatIsOpen])
 
   // Push now-playing metadata to the OS media session. On web this feeds the
-  // Media Session API (lock-screen/tray controls); on native it is a no-op and
-  // react-native-track-player owns the system controls. One effect for both
-  // platforms, so no platform branching at the call site.
+  // Media Session API (lock-screen/tray controls); on native `setNowPlaying`
+  // calls `TrackPlayer.updateNowPlayingMetadata` so the Android notification
+  // shows the same values (see `src/hooks/useAudioPlayer.ts`). One effect for
+  // both platforms, so no platform branching at the call site.
   useEffect(() => {
     setNowPlaying({ title: status.trackTitle, artist: status.trackArtist })
   }, [status.trackTitle, status.trackArtist, setNowPlaying])
+
+  // Sideloaded-APK update check — Android only, exactly once on mount.
+  //
+  // `checkForUpdate` resolves to `null` for every failure mode (offline, 403
+  // rate limit, malformed payload, no newer tag) and is a no-op on web, so a
+  // failed check can only ever mean "no affordance", never an error surface.
+  // Deliberately not re-checked: we do not want to poll the GitHub API, and a
+  // stale "update available" link is harmless (the installer still validates
+  // the package).
+  useEffect(() => {
+    if (Platform.OS !== 'android') return
+
+    // Cache sweep: drop update APKs left behind by a previous session. Only
+    // artifacts older than a few minutes are touched — this is a MOUNT effect,
+    // not process start, so a remount while the system installer is still
+    // reading a freshly downloaded APK must not delete it (that install would
+    // fail with "there was a problem parsing the package"). The default age gate
+    // in `cleanupUpdateArtifacts` enforces the delay.
+    cleanupUpdateArtifacts()
+
+    let cancelled = false
+    void checkForUpdate()
+      .then((info) => {
+        if (!cancelled) setUpdateInfo(info)
+      })
+      .catch(() => {
+        // Defensive: the service is implemented to never reject.
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const isPlaying =
     state === 'playing' || state === 'buffering' || state === 'loading' || state === 'reconnecting'
@@ -180,6 +220,9 @@ export default function HomeScreen() {
    * in a new tab with `noopener,noreferrer`; `Linking.openURL` (which maps to
    * `window.open` on react-native-web) covers everything else. Never throws —
    * a blocked popup must not take the player down.
+   *
+   * `ANDROID_APP_DOWNLOAD_URL` comes from a platform-split module so the URL
+   * literal stays out of the Android bundle (see `src/constants/androidAppDownload.ts`).
    */
   const handleDownloadAndroidApp = useCallback(() => {
     try {
@@ -196,6 +239,32 @@ export default function HomeScreen() {
       // Popup blocked / URL handler missing — ignore.
     }
   }, [])
+
+  /**
+   * Downloads the newer APK and hands it to the Android package installer.
+   *
+   * Repeat taps are ignored while a download is in flight (`updateBusy`). Any
+   * failure (network drop, no installer activity) resolves to the tappable
+   * state again — the user can just tap once more; nothing is surfaced as an
+   * error, and nothing here can take the player down.
+   *
+   * `startActivityAsync` resolves once the user leaves the installer, so the
+   * busy state covers the whole confirmation flow. A successful install
+   * restarts the app, after which `checkForUpdate` finds nothing new and the
+   * affordance disappears on its own.
+   */
+  const handleUpdateApp = useCallback(() => {
+    if (!updateInfo || updateBusy) return
+
+    setUpdateBusy(true)
+    void downloadAndInstall(updateInfo.apkUrl)
+      .catch(() => {
+        // Swallow — the button reverts to its normal state below.
+      })
+      .finally(() => {
+        setUpdateBusy(false)
+      })
+  }, [updateInfo, updateBusy])
 
   return (
     <View style={styles.container}>
@@ -264,18 +333,6 @@ export default function HomeScreen() {
           >
             <Ionicons name="shield-checkmark" size={18} color="#b3b3b3" />
           </TouchableOpacity>
-          {/* Web only: native users already have the app installed. */}
-          {Platform.OS === 'web' && (
-            <TouchableOpacity
-              onPress={handleDownloadAndroidApp}
-              style={styles.headerBtn}
-              activeOpacity={0.85}
-              accessibilityRole="link"
-              accessibilityLabel="Скачать приложение"
-            >
-              <Ionicons name="download-outline" size={18} color="#b3b3b3" />
-            </TouchableOpacity>
-          )}
         </View>
       </View>
 
@@ -295,6 +352,56 @@ export default function HomeScreen() {
         currentSlug={currentSlug || 'main'}
         onSelect={selectSubstation}
       />
+
+      {/*
+        Bottom-right affordance under the station list (which scrolls
+        internally), inset by the same 16px content edge as the rest of the
+        page so it never turns the page itself into a scroll container.
+
+        Web: the existing `Скачать APK` link that opens the release asset in a
+        new tab. Android: `Обновить`, rendered ONLY while a newer sideloaded
+        build exists — on the current version (and until the check resolves)
+        this branch renders nothing at all.
+      */}
+      {Platform.OS === 'web' ? (
+        <View style={styles.downloadRow}>
+          <TouchableOpacity
+            onPress={handleDownloadAndroidApp}
+            style={styles.downloadLink}
+            activeOpacity={0.6}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            accessibilityRole="link"
+            accessibilityLabel="Скачать APK"
+          >
+            <Ionicons name="download-outline" size={15} color="#b3b3b3" />
+            <Text style={styles.downloadLinkText} allowFontScaling={false}>
+              Скачать APK
+            </Text>
+          </TouchableOpacity>
+        </View>
+      ) : updateInfo ? (
+        <View style={styles.downloadRow}>
+          <TouchableOpacity
+            onPress={handleUpdateApp}
+            disabled={updateBusy}
+            style={styles.downloadLink}
+            activeOpacity={0.6}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            accessibilityRole="link"
+            accessibilityLabel="Обновить"
+            accessibilityState={{ busy: updateBusy, disabled: updateBusy }}
+          >
+            {updateBusy ? (
+              <ActivityIndicator size="small" color="#b3b3b3" />
+            ) : (
+              <Ionicons name="download-outline" size={15} color="#b3b3b3" />
+            )}
+            <Text style={styles.downloadLinkText} allowFontScaling={false}>
+              Обновить
+            </Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
 
       {mode === 'track' && currentTrack && (
         <PlayerBar track={currentTrack} progress={trackProgress} onStop={stopTrack} />
@@ -320,7 +427,7 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   // `overflow: hidden` clips horizontally — a long now-playing title can never
   // widen the root and force horizontal scrolling.
-  container: { flex: 1, backgroundColor: '#0d0d0d', overflow: 'hidden' },
+  container: { flex: 1, backgroundColor: APP_SURFACE_BG, overflow: 'hidden' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -369,5 +476,31 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  // Full-width row that only exists to hold the right-aligned APK link (web) /
+  // `Обновить` affordance (Android) and inset it by the same 16px content edge
+  // as the header / player / list, so it lines up with the content's right edge
+  // and never touches the screen edge. `width: '100%'` keeps it a stable flex
+  // child (its height does not depend on the link's intrinsic text width).
+  downloadRow: {
+    width: '100%',
+    paddingHorizontal: 16,
+    paddingTop: 4,
+    paddingBottom: 8,
+    alignItems: 'flex-end',
+  },
+  // Plain text link — deliberately quieter than any button: no background, no
+  // border, no pill radius, no accent fill. Only the icon + label, muted grey.
+  // The touch target is widened with `hitSlop` (on the TouchableOpacity) instead
+  // of padding, so the text stays visually flush with the content right edge.
+  downloadLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+  },
+  downloadLinkText: {
+    color: '#b3b3b3',
+    fontSize: 13,
   },
 })

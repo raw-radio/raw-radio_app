@@ -531,7 +531,25 @@ const styles = StyleSheet.create({
   },
   // Height bound is set inline from the live window size (80%); `flexShrink`
   // lets the list shrink inside the sheet so long chats scroll internally.
-  drawer: { backgroundColor: '#1a1a1a', borderTopLeftRadius: 16, borderTopRightRadius: 16 },
+  drawer: {
+    backgroundColor: '#1a1a1a',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    // `.chat-sheet { box-shadow: 0 -4px 20px rgba(0,0,0,.5) }` — upward shadow
+    // onto the dimmed backdrop. Web: exact CSS string. Native: iOS honours the
+    // negative offset; Android `elevation` only casts downward, so the Android
+    // approximation gives depth without the top glow.
+    ...Platform.select({
+      web: { boxShadow: '0 -4px 20px rgba(0,0,0,0.5)' },
+      default: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -4 },
+        shadowOpacity: 0.5,
+        shadowRadius: 20,
+        elevation: 12,
+      },
+    }),
+  },
   drawerFramed: { width: '100%' },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#222' },
   title: { color: '#fff', fontSize: 18, fontWeight: 'bold' },

@@ -13,6 +13,7 @@ import {
 import { Ionicons } from '@expo/vector-icons'
 import { useTrackSearch } from '../hooks/useTrackSearch'
 import { formatDuration } from '../utils/format'
+import { APP_BACKDROP_BG } from '../utils/layout'
 import type { OnDemandTrack } from '../types'
 
 interface TrackSearchModalProps {
@@ -130,7 +131,10 @@ export function TrackSearchModal({ isOpen, onClose, onTrackSelect }: TrackSearch
 }
 
 const styles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: '#0d0d0d', paddingTop: 50 },
+  // Deliberately stays the darker `--bg-primary` (#0d0d0d) rather than following
+  // the new `#1a1a1a` app surface: the modal is a full-screen separate layer, and
+  // the darker backdrop is what keeps the `#1a1a1a` input/row surfaces visible.
+  overlay: { flex: 1, backgroundColor: APP_BACKDROP_BG, paddingTop: 50 },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: '#222' },
   searchInputWrapper: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a1a', borderRadius: 8, paddingHorizontal: 12, height: 44 },
   searchInput: { flex: 1, color: '#fff', fontSize: 16, marginLeft: 8 },

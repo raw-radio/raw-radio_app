@@ -14,7 +14,7 @@ import { Platform, useWindowDimensions } from 'react-native'
 /**
  * Viewport width (px) at/above which the web build shows the centred card.
  * Mirrors the site's `@media (min-width: 768px)` — below that the player is
- * full-bleed (`body { background: #0d0d0d }`).
+ * full-bleed (`body { background: … }`).
  */
 export const APP_FRAME_BREAKPOINT = 768
 
@@ -22,18 +22,46 @@ export const APP_FRAME_BREAKPOINT = 768
 export const COLUMN_MAX_WIDTH = 480
 
 /**
- * Page backdrop of the *unframed* layout (`body { background: #0d0d0d }`).
- * Doubles as the app surface colour — the column fill.
+ * App surface colour — the column / player-container fill.
+ *
+ * Mirrors the design-system token `--bg-secondary` / `--raw-color-bg-secondary`
+ * from `packages/ui/src/tokens/_tokens.scss` (= `#1a1a1a`). The surface is the
+ * card that carries the border in the framed layout and the whole screen in the
+ * unframed one, so it must match the admin/UI token rather than the old
+ * `--bg-primary` `#0d0d0d`.
  */
-export const APP_SURFACE_BG = '#0d0d0d'
+export const APP_SURFACE_BG = '#1a1a1a'
 
-/** Alias kept for the unframed shell: the page behind the full-bleed app. */
+/**
+ * One step above the surface — `--bg-tertiary` / `--raw-color-bg-tertiary`
+ * (= `#2a2a2a`). Used for elements that used to sit on top of the old darker
+ * `#0d0d0d` surface and would otherwise disappear into the new `#1a1a1a` one
+ * (e.g. the on-demand `PlayerBar`, raised panels).
+ */
+export const APP_SURFACE_BG_RAISED = '#2a2a2a'
+
+/**
+ * Intentionally-dark layer — `--bg-primary` / `--raw-color-bg-primary`
+ * (= `#0d0d0d`). The full-screen track-search modal keeps this darker backdrop
+ * on purpose so it still reads as a separate layer above the `#1a1a1a` surface
+ * (and so its `#1a1a1a` inputs/rows keep their contrast).
+ */
+export const APP_BACKDROP_BG = '#0d0d0d'
+
+/**
+ * Page backdrop of the *unframed* layout. Stays aliased to the surface: on
+ * native / narrow web the shell and the column are meant to be
+ * indistinguishable (the column fills the shell), so a darker backdrop would
+ * peek through at the edges during overscroll and read as a seam. The framed
+ * desktop layout gets its own darker backdrop below.
+ */
 export const FRAME_OUTER_BG = APP_SURFACE_BG
 
 /**
  * Page backdrop of the *framed* desktop layout — `body { background: #080808 }`
  * inside `@media (min-width: 768px)`. Darker than the surface so the card reads
- * as a floating device.
+ * as a floating device. Left untouched by the surface recolour on purpose: it is
+ * what keeps the `#1a1a1a` card legible as a distinct object.
  */
 export const FRAME_OUTER_BG_FRAMED = '#080808'
 

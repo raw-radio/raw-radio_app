@@ -10,6 +10,7 @@ import {
 } from 'react-native'
 import { Stack, useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
+import { APP_SURFACE_BG, APP_SURFACE_BG_RAISED } from '../src/utils/layout'
 
 /**
  * Legal screen «Правообладателям» (rights holders / copyright).
@@ -144,7 +145,7 @@ export default function CopyrightScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0d0d0d' },
+  container: { flex: 1, backgroundColor: APP_SURFACE_BG },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -196,7 +197,12 @@ const styles = StyleSheet.create({
   contact: {
     marginTop: 16,
     padding: 20,
-    backgroundColor: '#1a1a1a',
+    // Was `#1a1a1a` (`--bg-secondary`) when the screen backdrop was the old
+    // `#0d0d0d` surface. The screen now uses `--bg-secondary` itself, so the
+    // raised panel moves up one step to `--bg-tertiary` to keep reading as a
+    // distinct block (the static copyright.html used the same #1a1a1a panel on
+    // a #0d0d0d page — same one-step lift).
+    backgroundColor: APP_SURFACE_BG_RAISED,
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 16,

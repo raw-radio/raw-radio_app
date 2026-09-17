@@ -17,6 +17,9 @@
     },
     "android": {
       "package": "com.rawradio.app",
+      "permissions": [
+        "REQUEST_INSTALL_PACKAGES"
+      ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#FF6B35"

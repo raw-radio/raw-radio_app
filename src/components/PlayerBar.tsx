@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet } from 'react-native'
 import { Ionicons } from '@expo/vector-icons'
 import type { OnDemandTrack } from '../types'
 import { formatDuration } from '../utils/format'
+import { APP_SURFACE_BG_RAISED } from '../utils/layout'
 
 interface PlayerBarProps {
   track: OnDemandTrack
@@ -37,7 +38,11 @@ export function PlayerBar({ track, progress, onStop }: PlayerBarProps) {
 }
 
 const styles = StyleSheet.create({
-  container: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a1a', paddingHorizontal: 16, paddingVertical: 10, borderTopWidth: 1, borderTopColor: '#222' },
+  // Was `#1a1a1a` (`--bg-secondary`) over the old `#0d0d0d` app surface. The
+  // surface is now `--bg-secondary`, so the bar lifts one step to
+  // `--bg-tertiary` to stay a visible strip; otherwise it would be the same
+  // colour as the screen behind it and only the 1px divider would show.
+  container: { flexDirection: 'row', alignItems: 'center', backgroundColor: APP_SURFACE_BG_RAISED, paddingHorizontal: 16, paddingVertical: 10, borderTopWidth: 1, borderTopColor: '#222' },
   iconWrap: { marginRight: 10 },
   info: { flex: 1 },
   trackName: { color: '#fff', fontSize: 14, fontWeight: '600' },

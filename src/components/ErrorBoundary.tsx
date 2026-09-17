@@ -1,5 +1,6 @@
 import React from 'react'
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { APP_SURFACE_BG } from '../utils/layout'
 
 interface Props {
   children: React.ReactNode
@@ -59,7 +60,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0d0d0d',
+    backgroundColor: APP_SURFACE_BG,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,

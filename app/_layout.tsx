@@ -144,7 +144,7 @@ const styles = StyleSheet.create({
   // Desktop card, web >= APP_FRAME_BREAKPOINT only. Mirrors the site's
   // `#root` inside `@media (min-width: 768px)`: 480px wide, 1px #333 border,
   // 1rem radius, `margin: 2rem auto`, `0 10px 25px rgba(0,0,0,.5)` shadow and
-  // the #0d0d0d surface. `overflow: hidden` clips children to the rounded
+  // the #1a1a1a surface. `overflow: hidden` clips children to the rounded
   // corners and makes the card the scroll container for long content.
   columnFramed: {
     maxWidth: COLUMN_MAX_WIDTH,

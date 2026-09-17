@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Animated as RNAnimated,
   Easing,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -14,9 +15,9 @@ import Animated, {
   interpolate,
   useAnimatedStyle,
   useSharedValue,
-  withDelay,
   withRepeat,
   withTiming,
+  type SharedValue,
 } from 'react-native-reanimated'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
@@ -27,8 +28,19 @@ import { useReducedMotion } from '../hooks/useReducedMotion'
 const PLAY_BUTTON_SIZE = 140
 const PLAY_ICON_SIZE = 48
 const RING_DURATION_MS = 2000
-/** CSS `animation-delay` per ring: 0s / 0.6s / 1.2s. */
+/**
+ * CSS `animation-delay` per ring: 0s / 0.6s / 1.2s. Kept in ms as the verbatim
+ * transcription of the web source values (so the derivation below is auditable
+ * against `player.scss`); only the fractions in {@link RING_OFFSETS} are used at
+ * runtime.
+ */
 const RING_DELAYS_MS = [0, 600, 1200]
+/**
+ * The same staggers expressed as fractions of ONE period (600/2000 = 0.3,
+ * 1200/2000 = 0.6). Unlike a per-ring timer, an arithmetic offset on a shared
+ * clock cannot drift: the gap is baked into the numbers, not into scheduling.
+ */
+const RING_OFFSETS = RING_DELAYS_MS.map((delay) => delay / RING_DURATION_MS)
 const RING_MAX_SCALE = 1.8
 const RING_START_OPACITY = 0.6
 
@@ -49,62 +61,61 @@ interface PlayerProps {
   liveLabel?: string
 }
 
-interface PulseRingProps {
-  /** Stagger offset in ms, applied ONCE at start (CSS `animation-delay` parity). */
-  delay: number
-  active: boolean
-}
-
 /**
  * One expanding ripple (`pulse-ring` + `@keyframes pulseRing`):
  * scale 1 → 1.8, opacity 0.6 → 0 over 2s, looping forever.
  *
- * `withDelay` applies the stagger only once, before the loop starts, so every
- * ring then has an exact 2000ms period (CSS `animation-delay: 0s/0.6s/1.2s` +
- * `infinite`). `withRepeat(..., -1, reverse: false)` rewinds the shared value to
- * its start value on every repetition — that rewind is what keeps the ripple
- * running, instead of a built-in `Animated.loop` whose `timing` goes 0 → 1 only
- * once and then animates nothing. A single `progress` value drives both
- * `transform: scale` and `opacity`, which are native-driver safe.
+ * All three ripples are DERIVED FROM ONE CLOCK. `Player` owns `ringClock`, a
+ * single linear 0 → 1 loop over `RING_DURATION_MS`; this helper only shifts that
+ * clock by a constant arithmetic `offset`. The phase gap between any two rings
+ * is therefore a constant of the math (the difference of their offsets) and is
+ * structurally unable to drift — there is no second timer to race against.
+ *
+ * The clock is linear on purpose: the phase must advance proportionally to time.
+ * The ease-out feel is applied AFTER the offset, to the derived phase
+ * (`1 - (1 - phase)^3`), so easing never touches the phase relationship.
+ *
+ * Why NOT three independent `withDelay(withRepeat(withTiming(...)))` timers (the
+ * previous design)? Reanimated's `repeat` restarts the inner timing from the
+ * frame on which the previous repetition was *observed* to finish, not from its
+ * exact mathematical end timestamp — every repetition absorbs up to one frame of
+ * overshoot (see `react-native-reanimated/src/animation/repeat.ts`:
+ * `onStart(..., now, ...)` uses the frame's `now`). Each ring was its own timer
+ * and absorbed that overshoot on a
+ * different frame, so the 600/1200ms offsets slowly wandered; eventually the
+ * rings converged into lockstep and read as a single ring. Independent timers
+ * carry no invariant tying them together — one shared clock does. Do not
+ * reintroduce per-ring delays.
+ *
+ * `withRepeat(..., -1, reverse: false)` rewinds the shared value to its start
+ * value on every repetition — that rewind is what keeps the ripple running, as
+ * opposed to a built-in `Animated.loop` whose `timing` goes 0 → 1 once and then
+ * animates nothing.
+ *
+ * The `'worklet'` directive is load-bearing: `Player` calls this helper from
+ * inside three `useAnimatedStyle` callbacks, and a non-worklet function can't be
+ * called on the UI thread. Passing the clock as a *parameter* (rather than as a
+ * prop to a child component) is also deliberate — a missing clock can only ever
+ * be a type error here, never a runtime `clock is undefined`.
  */
-function PulseRing({ delay, active }: PulseRingProps) {
-  const progress = useSharedValue(0)
+function ringStyle(clock: SharedValue<number>, offset: number, active: boolean) {
+  'worklet'
+  // Inactive: rings must be fully invisible. Resetting the clock alone is not
+  // enough, because the offset rings would rest at a mid-period phase.
+  if (!active) {
+    return { opacity: 0, transform: [{ scale: 1 }] }
+  }
 
-  useEffect(() => {
-    if (!active) {
-      cancelAnimation(progress)
-      progress.value = 0
-      return
-    }
-
-    // Restart from a clean phase, then: one-time stagger delay → infinite loop.
-    cancelAnimation(progress)
-    progress.value = 0
-    progress.value = withDelay(
-      delay,
-      withRepeat(
-        withTiming(1, {
-          duration: RING_DURATION_MS,
-          easing: ReanimatedEasing.out(ReanimatedEasing.ease),
-        }),
-        -1,
-        false,
-      ),
-    )
-
-    return () => {
-      cancelAnimation(progress)
-    }
-  }, [active, delay, progress])
+  const phase = (clock.value + offset) % 1
+  // Cubic ease-out on the derived phase (the clock itself stays linear).
+  const eased = 1 - Math.pow(1 - phase, 3)
 
   // `0% { opacity: 0.6 }` → `100% { opacity: 0 }`. The extra 0-point keeps the
-  // ring invisible during the stagger delay instead of leaving a static circle.
-  const animatedStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(progress.value, [0, 0.001, 1], [0, RING_START_OPACITY, 0]),
-    transform: [{ scale: interpolate(progress.value, [0, 1], [1, RING_MAX_SCALE]) }],
-  }))
-
-  return <Animated.View pointerEvents="none" style={[styles.pulseRing, animatedStyle]} />
+  // ring invisible right at the start of its cycle instead of popping in.
+  return {
+    opacity: interpolate(eased, [0, 0.001, 1], [0, RING_START_OPACITY, 0]),
+    transform: [{ scale: interpolate(eased, [0, 1], [1, RING_MAX_SCALE]) }],
+  }
 }
 
 export function Player({ state, status, onToggle, isLive = false, liveLabel }: PlayerProps) {
@@ -114,6 +125,46 @@ export function Player({ state, status, onToggle, isLive = false, liveLabel }: P
   const isLoading = state === 'loading' || state === 'buffering' || state === 'reconnecting'
   const isOffline = state === 'error' || state === 'offline' || state === 'reconnecting'
   const ringsActive = isPlaying && !reducedMotion
+
+  // ONE clock for all pulse rings. A single linear 0 → 1 loop over one period;
+  // each ring reads it with a constant arithmetic offset (see `ringStyle`).
+  // The rings previously had one Reanimated timer each and drifted into
+  // lockstep — one shared clock makes their phases an invariant.
+  const ringClock = useSharedValue(0)
+
+  // Three explicit `useAnimatedStyle` calls — a fixed count, so no hooks in a
+  // loop. Each callback is auto-workletized by the Reanimated Babel plugin, picks
+  // `ringClock` / `ringsActive` up from this component's closure, and calls the
+  // shared `ringStyle` worklet directly: there is no prop through which the
+  // clock could ever arrive undefined.
+  const ring0Style = useAnimatedStyle(() => ringStyle(ringClock, RING_OFFSETS[0], ringsActive))
+  const ring1Style = useAnimatedStyle(() => ringStyle(ringClock, RING_OFFSETS[1], ringsActive))
+  const ring2Style = useAnimatedStyle(() => ringStyle(ringClock, RING_OFFSETS[2], ringsActive))
+
+  useEffect(() => {
+    if (!ringsActive) {
+      // Paused / reduced motion: stop the clock and rewind it, so the rings are
+      // gone rather than frozen mid-pulse (the ring styles also gate on `active`).
+      cancelAnimation(ringClock)
+      ringClock.value = 0
+      return
+    }
+
+    // Restart from a clean phase, then loop forever. Linear easing is required:
+    // the per-ring offsets are fractions of time, so the clock must advance
+    // proportionally (the ease-out lives in `ringStyle`, after the offset).
+    cancelAnimation(ringClock)
+    ringClock.value = 0
+    ringClock.value = withRepeat(
+      withTiming(1, { duration: RING_DURATION_MS, easing: ReanimatedEasing.linear }),
+      -1,
+      false,
+    )
+
+    return () => {
+      cancelAnimation(ringClock)
+    }
+  }, [ringsActive, ringClock])
 
   const trackTitle = status.trackTitle
   const trackArtist = status.trackArtist
@@ -146,9 +197,9 @@ export function Player({ state, status, onToggle, isLive = false, liveLabel }: P
   return (
     <View style={styles.hero}>
       <View style={styles.playButtonWrap}>
-        {RING_DELAYS_MS.map((delay) => (
-          <PulseRing key={delay} delay={delay} active={ringsActive} />
-        ))}
+        <Animated.View pointerEvents="none" style={[styles.pulseRing, ring0Style]} />
+        <Animated.View pointerEvents="none" style={[styles.pulseRing, ring1Style]} />
+        <Animated.View pointerEvents="none" style={[styles.pulseRing, ring2Style]} />
 
         <Pressable
           style={styles.playButtonTouchable}
@@ -258,16 +309,32 @@ const styles = StyleSheet.create({
     borderRadius: PLAY_BUTTON_SIZE / 2,
     alignItems: 'center',
     justifyContent: 'center',
-    // box-shadow: 0 0 40px rgba(255,107,53,0.35), 0 8px 32px rgba(0,0,0,0.4)
-    shadowColor: '#ff6b35',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.35,
-    shadowRadius: 32,
-    elevation: 12,
+    // `.play-btn { box-shadow: 0 0 40px rgba(255,107,53,.35), 0 8px 32px rgba(0,0,0,.4) }`.
+    // Web: pass the exact CSS string through — react-native-web maps a plain
+    // `boxShadow` string verbatim (`mapBoxShadow` returns strings unchanged).
+    // Native: approximate with the legacy shadow props. The centred orange halo
+    // (offset 0/0) is the load-bearing part — it is what blooms onto the
+    // near-black surface; the dark drop shadow is a web-only nicety.
+    ...Platform.select({
+      web: {
+        boxShadow: '0 0 40px rgba(255,107,53,0.35), 0 8px 32px rgba(0,0,0,0.4)',
+      },
+      default: {
+        shadowColor: '#ff6b35',
+        shadowOffset: { width: 0, height: 0 },
+        shadowOpacity: 0.35,
+        shadowRadius: 40,
+        elevation: 12,
+      },
+    }),
   },
   playButtonOffline: {
-    shadowOpacity: 0,
-    elevation: 0,
+    // `.play-btn--offline { box-shadow: none }` — neutralise BOTH platform
+    // paths (web `boxShadow` string, native legacy props).
+    ...Platform.select({
+      web: { boxShadow: 'none' },
+      default: { shadowOpacity: 0, elevation: 0 },
+    }),
   },
   playIconGlyph: {
     marginLeft: 4,

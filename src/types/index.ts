@@ -36,8 +36,8 @@ export interface OnDemandTrack {
 
 /**
  * Now-playing metadata consumed by the OS media session.
- * On web it feeds the Media Session API; on native it is a no-op because
- * react-native-track-player drives the system controls.
+ * On web it feeds the Media Session API; on native it is pushed to the Android
+ * notification via react-native-track-player's `updateNowPlayingMetadata`.
  */
 export interface NowPlayingMeta {
   title: string | null
@@ -45,3 +45,14 @@ export interface NowPlayingMeta {
 }
 
 export type PlayerMode = 'radio' | 'track'
+
+/**
+ * A newer Android build published on GitHub Releases (the sideload source of
+ * truth). `current` is the installed `versionName`, `latest` is the release
+ * tag's version and `apkUrl` is the `raw-radio-universal.apk` asset URL.
+ */
+export interface AppUpdateInfo {
+  current: string
+  latest: string
+  apkUrl: string
+}
