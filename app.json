@@ -28,6 +28,14 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      [
+        "onesignal-expo-plugin",
+        {
+          "mode": "development",
+          "smallIconAccentColor": "#FF6B35",
+          "disableLocation": true
+        }
+      ],
       "expo-router",
       "expo-font",
       "expo-splash-screen",

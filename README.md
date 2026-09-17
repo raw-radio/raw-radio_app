@@ -58,6 +58,12 @@ app/
 │   │   ├── useStreamStatus.ts     # Live status + now-playing via socket.io
 │   │   ├── useSubstations.ts      # Substation list
 │   │   └── useTrackSearch.ts      # Track search
+│   ├── services/
+│   │   ├── oneSignal.ts           # OneSignal init (native)
+│   │   ├── oneSignal.web.ts       # Web no-op (SDK is native-only)
+│   │   ├── registerPlaybackService.ts     # RNTP playback service registration
+│   │   ├── registerPlaybackService.web.ts # Web no-op
+│   │   └── trackPlayerService.ts  # Remote control event handlers
 │   ├── types/
 │   │   └── index.ts          # Shared TypeScript types
 │   └── utils/
@@ -85,6 +91,7 @@ The app is configured entirely through public Expo environment variables, define
 | ----------------------- | ------------------------------------------------ |
 | `EXPO_PUBLIC_API_URL`   | Base URL of the RAW Radio HTTP API               |
 | `EXPO_PUBLIC_WS_URL`    | URL of the realtime (socket.io) server           |
+| `EXPO_PUBLIC_ONESIGNAL_APP_ID` | OneSignal app id used for push notifications |
 
 Example values use placeholders only:
 
@@ -94,6 +101,19 @@ EXPO_PUBLIC_WS_URL=https://your-ws.example
 ```
 
 Only variables prefixed with `EXPO_PUBLIC_` are embedded into the client bundle and are therefore **public**. Never place secrets, tokens, private keys, or credentials in this repository or in `EXPO_PUBLIC_*` variables. `.env` files are git-ignored.
+
+## Push notifications (OneSignal)
+
+Phase 1: the app **receives** push notifications. Sending from the admin panel is a later phase.
+
+- **Env var**: `EXPO_PUBLIC_ONESIGNAL_APP_ID` must hold the OneSignal app id. It is a public identifier (it ships inside the bundle, like the Firebase config), so an empty placeholder is committed in `.env.example` and the real value lives in the git-ignored `.env`. If the variable is empty, OneSignal init is skipped entirely.
+- **Credentials**: the **FCM v1 Service Account JSON** is a secret. It goes **only** into the OneSignal dashboard (Settings → Push & In-App → Android → FCM v1). It must **never** be added to this repository, to `.env`, or to `app.json` — the repo is public.
+- **Expo Go is not supported**: `react-native-onesignal` is a native module, so a **dev build / prebuild** is required (`npx expo prebuild --platform android` then `npm run android`). Send a test push from the OneSignal dashboard (Audience → Subscriptions → New Message → Test) after the app registers.
+- **Runtime permission**: the app requests notification permission on first launch (`requestPermission(true)`).
+- **Tap handling**: a push may carry a deep link in `additionalData.url` (e.g. `additionalData: { "url": "/?station=rock" }`). Only internal paths starting with a single `/` are accepted; absolute (`https://…`) and protocol-relative (`//…`) URLs are ignored. There is currently a single route (`/`), so links resolve to the home screen.
+- **Release builds**: `app.json` uses `mode: "development"` for the OneSignal plugin (the option is required even for Android-only). Change it to `"production"` before shipping a release build and re-run `npx expo prebuild --platform android --clean`.
+- **Web push is not supported in this phase.** `react-native-onesignal` has no React Native Web build, so `src/services/oneSignal.web.ts` is an intentional no-op and no OneSignal code is bundled for web. Web push would be a separate integration (`react-onesignal` + a service worker).
+- **Logging**: the native SDK runs at `LogLevel.Verbose` while this feature is being brought up; lower it before release.
 
 ## License
 

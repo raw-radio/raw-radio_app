@@ -38,8 +38,17 @@ export default function HomeScreen() {
     liveLabelText,
   } = useChat(currentSlug)
   const {
-    toggle, state, volume, setVolume, muted, toggleMute,
-    mode, currentTrack, trackProgress, playTrack, stopTrack,
+    toggle,
+    state,
+    volume,
+    setVolume,
+    muted,
+    toggleMute,
+    mode,
+    currentTrack,
+    trackProgress,
+    playTrack,
+    stopTrack,
   } = useAudioPlayer(currentSlug)
 
   const [searchOpen, setSearchOpen] = useState(false)
@@ -62,7 +71,11 @@ export default function HomeScreen() {
 
   const dotPulsing = connected && isPlaying && !reducedMotion
   const dotColor = connected ? DOT_CONNECTED : DOT_DISCONNECTED
-  const connectionLabel = connected ? (isPlaying ? 'Connected — playing' : 'Connected') : 'Disconnected'
+  const connectionLabel = connected
+    ? isPlaying
+      ? 'Connected — playing'
+      : 'Connected'
+    : 'Disconnected'
 
   // `connection-dot--playing` — animate opacity/scale only while the stream plays.
   useEffect(() => {
@@ -122,10 +135,13 @@ export default function HomeScreen() {
     refreshNowPlaying()
   }, [toggle, refreshNowPlaying])
 
-  const handleTrackSelect = useCallback((track: OnDemandTrack) => {
-    setSearchOpen(false)
-    playTrack(track)
-  }, [playTrack])
+  const handleTrackSelect = useCallback(
+    (track: OnDemandTrack) => {
+      setSearchOpen(false)
+      playTrack(track)
+    },
+    [playTrack],
+  )
 
   return (
     <View style={styles.container}>
@@ -208,7 +224,11 @@ export default function HomeScreen() {
         <PlayerBar track={currentTrack} progress={trackProgress} onStop={stopTrack} />
       )}
 
-      <TrackSearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} onTrackSelect={handleTrackSelect} />
+      <TrackSearchModal
+        isOpen={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onTrackSelect={handleTrackSelect}
+      />
       {!chatIsLoading && chatIsOpen && (
         <ChatSheet
           isOpen={chatVisible}
@@ -232,6 +252,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 8,
     paddingBottom: 4,
+    marginBottom: 24,
   },
   headerLogo: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   logoIcon: {

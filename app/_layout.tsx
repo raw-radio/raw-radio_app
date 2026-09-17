@@ -1,5 +1,6 @@
-import { Stack } from 'expo-router'
+import { Stack, useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
+import { useEffect } from 'react'
 import { StyleSheet } from 'react-native'
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 
@@ -15,7 +16,38 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 // depends on shaka-player, which is unreliable for live ICY/MP3 radio.
 import '../src/services/registerPlaybackService'
 
+// Same platform-split trick: oneSignal.ts (native, react-native-onesignal)
+// vs oneSignal.web.ts (intentional no-op — the SDK does not support RN Web).
+import { initOneSignal } from '../src/services/oneSignal'
+
+/**
+ * Only in-app deep links are acceptable as a push navigation target.
+ * Rejects absolute URLs (`https://…`), protocol-relative URLs (`//evil.com`)
+ * and anything that is not a plain `/path` — the tap payload is remote input.
+ */
+function isSafeInternalUrl(url: string | null): url is string {
+  return !!url && /^\/(?!\/)/.test(url)
+}
+
 export default function RootLayout() {
+  const router = useRouter()
+
+  useEffect(() => {
+    const appId = process.env.EXPO_PUBLIC_ONESIGNAL_APP_ID || ''
+    if (!appId) return
+
+    const unsubscribe = initOneSignal(appId, (url) => {
+      if (!isSafeInternalUrl(url)) return
+      try {
+        router.push(url)
+      } catch {
+        // Malformed target — ignore the tap rather than crash the app.
+      }
+    })
+
+    return unsubscribe
+  }, [router])
+
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.container}>
