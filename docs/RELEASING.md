@@ -99,7 +99,7 @@ and deletes it afterwards.
 
 | Variable                       | Required | Default                  | Purpose                                             |
 | ------------------------------ | -------- | ------------------------ | --------------------------------------------------- |
-| `EXPO_PUBLIC_ONESIGNAL_APP_ID` | **yes**  | —                        | OneSignal app id (public). The build fails without it, otherwise push would silently be disabled in the release |
+| `EXPO_PUBLIC_ONESIGNAL_APP_ID` | **yes**  | —                        | OneSignal app id (public). May be stored as a repository **variable** (preferred, it is not a secret) or as a **secret** with the same name — the workflow resolves `vars.… \|\| secrets.…`. Either way the build fails without it, otherwise push would silently be disabled in the release |
 | `EXPO_PUBLIC_API_URL`          | no       | `https://raw-radio.ru`   | API base URL baked into the bundle                  |
 | `EXPO_PUBLIC_WS_URL`           | no       | `https://raw-radio.ru`   | socket.io URL baked into the bundle                 |
 | `ANDROID_KEYSTORE_TYPE`        | no       | `pkcs12`                 | `pkcs12` (default) or `jks`                          |
@@ -183,11 +183,18 @@ the `Remove keystore` step (`if: always()`). Nothing signing-related is uploaded
 
 ## 5. Building a release APK locally (for testing)
 
+> Gradle must run on **JDK 17 or 21** — on JDK 24/25 AGP's prefab task fails with
+> `IllegalStateException: WARNING: A restricted method in java.lang.System has been called`.
+> `scripts/prepare-android-studio.sh` pins the Gradle daemon to a usable JDK for you; see
+> [`DEVELOPMENT.md`](./DEVELOPMENT.md) §3.
+
 ```bash
 cd app
 
-# 1. deps + native project
+# 1. deps + native project (prefer the helper: it also pins the Gradle daemon JDK)
 npm ci
+scripts/prepare-android-studio.sh         # = prebuild --clean + local-only settings
+# …or, if you want to do it by hand (then make sure the Gradle daemon runs on 17/21):
 npx expo prebuild --platform android --clean
 
 # 2. build, signed with your local keystore (kept outside the repo, or at the repo root — it is git-ignored)
@@ -252,5 +259,8 @@ The size and SHA-256 of every published APK are printed in the workflow summary.
 | `Alias <…> does not exist` | `KEY_ALIAS` ≠ the `-alias` used with `keytool -genkeypair` |
 | `APK is signed with the DEBUG keystore` | the `android.injected.signing.*` properties were not passed to Gradle |
 | `NDK not configured` / `No version of NDK matched` | bump `ANDROID_NDK_VERSION` in the workflow to the NDK version Expo SDK 57 pins (`node_modules/expo-modules-autolinking` → `ndkVersion`) |
+| `IllegalStateException: WARNING: A restricted method in java.lang.System has been called` | the Gradle daemon is running on JDK 24/25. CI uses Temurin 17; locally run `scripts/prepare-android-studio.sh` (see [`DEVELOPMENT.md`](./DEVELOPMENT.md) §3) |
+| `Cannot run program "node"` | local/IDE builds only — the Gradle daemon cannot see `node` on its `PATH`. See [`DEVELOPMENT.md`](./DEVELOPMENT.md) §4 |
+| `EXPO_PUBLIC_ONESIGNAL_APP_ID is not set (checked repository variable and repository secret)` | set it under Settings → Secrets and variables → Actions, as a **variable** (preferred) or a **secret** |
 | Build fails on `EXPO_PUBLIC_*` validation | set the repository variables, and make sure the API/WS URLs are public `https://` — never localhost |
 | The version in the release is unexpected | the tag (`app-vX.Y.Z`) wins over `app.json`; the workflow summary and release name print the effective version |

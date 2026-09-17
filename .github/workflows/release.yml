@@ -13,9 +13,13 @@
 #    KEY_ALIAS                — key alias inside the keystore
 #    KEY_PASSWORD             — key password
 #
-#  Required repository variables (… → Actions → Variables):
-#    EXPO_PUBLIC_ONESIGNAL_APP_ID — public OneSignal app id (push would silently
-#                                   be disabled without it, so the build fails)
+#  Required repository config (… → Actions → Variables **or** Secrets):
+#    EXPO_PUBLIC_ONESIGNAL_APP_ID — public OneSignal app id. It is a public value, so a
+#                                   repository *variable* is the natural home, but a
+#                                   *secret* with the same name works too (the workflow
+#                                   reads `vars.… || secrets.…`). Either way the build
+#                                   fails loudly when it is missing entirely — without it
+#                                   push notifications would be silently disabled.
 #  Optional variables:
 #    EXPO_PUBLIC_API_URL / EXPO_PUBLIC_WS_URL (default https://raw-radio.ru)
 #    ANDROID_KEYSTORE_TYPE (default pkcs12)
@@ -55,7 +59,9 @@ env:
   # a release APK must talk to the production API.
   EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL || 'https://raw-radio.ru' }}
   EXPO_PUBLIC_WS_URL: ${{ vars.EXPO_PUBLIC_WS_URL || 'https://raw-radio.ru' }}
-  EXPO_PUBLIC_ONESIGNAL_APP_ID: ${{ vars.EXPO_PUBLIC_ONESIGNAL_APP_ID }}
+  # Accepts the value from either an Actions *variable* or an Actions *secret* so the same
+  # configuration works no matter which of the two it was stored in (see the guard below).
+  EXPO_PUBLIC_ONESIGNAL_APP_ID: ${{ vars.EXPO_PUBLIC_ONESIGNAL_APP_ID || secrets.EXPO_PUBLIC_ONESIGNAL_APP_ID }}
   EXPO_NO_TELEMETRY: '1'
 
 jobs:
@@ -110,9 +116,19 @@ jobs:
                 ;;
             esac
           done
+          # The OneSignal app id is resolved as `vars.EXPO_PUBLIC_ONESIGNAL_APP_ID ||
+          # secrets.EXPO_PUBLIC_ONESIGNAL_APP_ID` in the job env, so it does not matter
+          # which of the two it was stored in. Public value → a variable is preferred,
+          # but the guard must accept either. Fail loudly when both are unset.
           if [ -z "${EXPO_PUBLIC_ONESIGNAL_APP_ID:-}" ]; then
-            echo "::error::Repository variable EXPO_PUBLIC_ONESIGNAL_APP_ID is not set."
-            echo "::error::Set it in Settings → Secrets and variables → Actions → Variables (see docs/RELEASING.md)."
+            echo "::error::EXPO_PUBLIC_ONESIGNAL_APP_ID is not set (checked repository variable and repository secret)."
+            echo "::error::Set it in Settings → Secrets and variables → Actions → Variables (preferred) or → Secrets — see docs/RELEASING.md."
+            exit 1
+          fi
+          # Catch a truncated/typo'd id here instead of shipping an APK whose push is dead.
+          if ! printf '%s' "$EXPO_PUBLIC_ONESIGNAL_APP_ID" |
+            grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+            echo "::error::EXPO_PUBLIC_ONESIGNAL_APP_ID is not a OneSignal UUID (expected 8-4-4-4-12 hex digits)."
             exit 1
           fi
 
@@ -241,8 +257,15 @@ jobs:
               -storetype "$ANDROID_KEYSTORE_TYPE" \
               -storepass "$KEYSTORE_PASSWORD" \
               -alias "$KEY_ALIAS" | awk '/SHA256:/ {print $2; exit}')"
+          # apksigner prints "V2 Signer: certificate SHA-256 digest: <hex>" — the digest is
+          # the LAST ": "-separated field, not the second one (that is the label, which made
+          # this comparison fail even for a correctly signed APK). Take $NF.
           ACTUAL="$("$APKSIGNER" verify --print-certs "dist/$APK_NAME" \
-              | awk -F': ' '/certificate SHA-256 digest/ {print $2; exit}')"
+              | awk -F': ' '/certificate SHA-256 digest/ {print $NF; exit}')"
+          if [ -z "$EXPECTED" ] || [ -z "$ACTUAL" ]; then
+            echo "::error::Could not read a certificate SHA-256 digest (keystore='$EXPECTED', apk='$ACTUAL')."
+            exit 1
+          fi
           if [ "$(printf '%s' "$EXPECTED" | norm)" != "$(printf '%s' "$ACTUAL" | norm)" ]; then
             echo "::error::APK signer ($ACTUAL) does not match the release keystore key ($EXPECTED)."
             exit 1
