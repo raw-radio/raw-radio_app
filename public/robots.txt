@@ -1,0 +1,8 @@
+User-agent: *
+Disallow: /live.mp3
+Disallow: /live.aac
+Disallow: /live.ogg
+Disallow: /live_hls.m3u8
+Disallow: /hls/
+Disallow: /status-json.xsl
+Disallow: /api/

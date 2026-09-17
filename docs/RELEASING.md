@@ -14,13 +14,16 @@ Tag pattern: `app-v*` → signed release APK → GitHub Release.
 ```bash
 # one-time: keystore + GitHub secrets (sections 1 and 2)
 
-# every release:
-#  1. bump the version in app.json (optional — CI can take it from the tag)
-#  2. commit + push
-git tag app-v0.2.0
-git push origin --tags
-# CI builds the signed APK and publishes it to Releases
+# every release — PREFERRED: build here, ship that exact binary (section 5)
+export KEYSTORE_PATH=/path/to/release.keystore      # passwords are prompted, never on argv
+scripts/release-local.sh --version=0.2.0
+
+# alternative: let CI build it (push a tag — CI publishes the release itself)
+git tag app-v0.2.0 && git push origin --tags
 ```
+
+Either way the tag is the release marker and CI never overwrites a release that already
+exists (section 3.1), so a local release is not clobbered by the tag-triggered build.
 
 Download (stable URL, always the newest release):
 
@@ -129,13 +132,15 @@ the production API.
    | Step | What happens |
    |------|--------------|
    | Setup | Node 22, JDK 17, Android SDK + NDK `27.1.12297006` + CMake `3.22.1` |
+   | `preflight` | on a tag: if a release for the tag already exists, the whole build is skipped (a locally published release wins — section 3.1) |
    | `npm ci` | installs the app dependencies |
    | `scripts/prepare-release.mjs` | version from the tag → `expo.version`; monotonic `android.versionCode`; OneSignal plugin → `production` (CI workspace only) |
    | `npx expo prebuild --platform android --clean` | regenerates `android/` from `app.json` |
+   | memory guard | `android/gradle.properties` must carry the raised `org.gradle.jvmargs` (applied by `plugins/withGradleJvmArgs.js` inside prebuild) — fails in seconds otherwise |
    | keystore | decoded from `ANDROID_KEYSTORE_BASE64` into `$RUNNER_TEMP/release.keystore`, validated with `keytool -list` before the build |
-   | `./gradlew assembleRelease` | signs the release APK with the injected signing config |
-   | verification | `apksigner verify`; the APK's certificate SHA-256 must equal the keystore's key SHA-256; a debug-signed APK fails the job |
-   | publish | `softprops/action-gh-release` attaches `raw-radio-universal.apk` to the tag's release with generated release notes |
+   | `./gradlew assembleRelease` | signs the release APK with the injected signing config; **Android Lint is skipped on purpose** (section 3.2) |
+   | verification | `scripts/verify-apk.sh` — manifest readable (`aapt2 dump badging`), package + launchable activity present, versionCode as expected, signed, signer ≠ debug key, signer's SHA-256 == keystore key's SHA-256 |
+   | publish | `softprops/action-gh-release` attaches `raw-radio-universal.apk` to the tag's release with generated release notes — unless a release for the tag already exists (release gate) |
 
 5. Verify the release: open the release page, check the artifact name and the SHA-256 printed in
    the workflow summary, then install it on a device:
@@ -146,7 +151,40 @@ the production API.
 
 **Manual run:** `Actions → RAW Radio App Release → Run workflow` builds the APK and uploads it as
 a workflow artifact only (no release is created, no tag needed). The optional `version` input
-overrides the version.
+overrides the version, `r8` enables R8/resource shrinking (experimental — section 6).
+
+### 3.1 Local release vs. tag-triggered CI build
+
+Both flows end in a GitHub Release whose tag is `app-vX.Y.Z`. They must not fight:
+
+- `scripts/release-local.sh` pushes the tag and creates the release within a second or two.
+- The tag push triggers this workflow. Its `preflight` job asks the API whether a release for
+  that tag exists; if it does, the build is skipped entirely (~20 CI minutes saved).
+- The tag is created a moment before the release object, so a very fast runner could still see
+  "no release yet". That is why there is a **second, authoritative gate** immediately before
+  publishing: after the ~20 min build it re-checks and skips the upload, leaving the locally
+  built APK untouched. The CI-built APK is still uploaded as a workflow artifact for
+  comparison.
+- Accepted failure mode: if both checks were to fail (e.g. GitHub API outage at both
+  moments), CI publishes its own build of the same commit under the same asset name — same
+  version, different SHA-256. The workflow summary prints the hash, so a mismatch is
+  detectable, and re-running the workflow after the API recovers restores the guard.
+
+### 3.2 Android Lint is not part of the release build
+
+`assembleRelease` normally also runs the release-only `lintVitalRelease` /
+`lintVitalAnalyzeRelease` gate. CI passes `-x lint -x lintVitalRelease -x
+lintVitalAnalyzeRelease -x lintVitalReportRelease` because that gate linted every one of the
+~50 native modules and died with `java.lang.OutOfMemoryError` plus *"Unexpected failure during
+lint analysis (this is a bug in lint or one of the libraries it depends on)"* (run
+35212151391; google issuetracker 178631052). It is not needed to produce a working APK, and
+`expo run:android` skips lint in exactly the same way.
+
+**Trade-off, explicitly:** fatal-severity lint findings would no longer fail CI. Compensation:
+the daemon memory is raised (`plugins/withGradleJvmArgs.js`) so lint *can* run, the artifact
+must pass `scripts/verify-apk.sh`, and the release should be installed on a device before it
+is announced. To bring lint back, drop the four `-x` flags, keep the memory settings, and
+verify one green run before trusting it.
 
 ---
 
@@ -181,39 +219,75 @@ the `Remove keystore` step (`if: always()`). Nothing signing-related is uploaded
 
 ---
 
-## 5. Building a release APK locally (for testing)
+## 5. Building and publishing a release locally (preferred)
 
 > Gradle must run on **JDK 17 or 21** — on JDK 24/25 AGP's prefab task fails with
 > `IllegalStateException: WARNING: A restricted method in java.lang.System has been called`.
-> `scripts/prepare-android-studio.sh` pins the Gradle daemon to a usable JDK for you; see
-> [`DEVELOPMENT.md`](./DEVELOPMENT.md) §3.
+> On macOS `scripts/release-local.sh` calls `scripts/prepare-android-studio.sh --skip-prebuild`,
+> which pins the Gradle daemon to a usable JDK for you; see [`DEVELOPMENT.md`](./DEVELOPMENT.md) §3.
+
+One command does prebuild → signed build → verification → tag → release:
 
 ```bash
 cd app
+export KEYSTORE_PATH="/absolute/path/to/release.keystore"   # default: ./release.keystore
+# KEYSTORE_PASSWORD / KEY_PASSWORD / KEY_ALIAS are prompted (hidden) when unset.
+# Exporting them is fine too; they are never passed on the command line.
+scripts/release-local.sh --version=0.2.0
+```
 
-# 1. deps + native project (prefer the helper: it also pins the Gradle daemon JDK)
+What it does, in order:
+
+1. `scripts/prepare-release.mjs` — version from `--version`, monotonic `android.versionCode`,
+   OneSignal plugin in `production` mode. `app.json` is restored on exit (the mutation is
+   workspace-only, exactly like CI).
+2. `expo prebuild --platform android --clean` (skip with `--skip-prebuild`), then local
+   settings via `scripts/prepare-android-studio.sh --skip-prebuild` on macOS.
+3. `./gradlew assembleRelease` with the same flags as CI — injected signing
+   (`-Pandroid.injected.signing.*`), `-PreactNativeArchitectures=armeabi-v7a,arm64-v8a` and the
+   deliberate lint skip.
+4. `scripts/verify-apk.sh` — the same gate CI runs (structure, versionCode, signature,
+   certificate fingerprint must equal the keystore's).
+5. `git tag -a app-v0.2.0` + `git push origin app-v0.2.0`, then `gh release create` with
+   `build-artifacts/raw-radio-universal.apk`.
+
+The APK lands in `build-artifacts/raw-radio-universal.apk` (git-ignored; kept out of `dist/`
+so a later `expo export --platform web` cannot delete it).
+
+Flags: `--no-publish` / `--dry-run` (build + verify only, no git/gh changes), `--abis=`, `--skip-prebuild`,
+`--notes-file=`, `--keystore=`, `--yes` (skip the confirmation prompt when the tree is dirty).
+
+Warnings built into the script:
+
+- a **dirty working tree** is called out (the release should be traceable to a commit) and needs
+  confirmation;
+- an **existing tag** is reused only if it points at `HEAD`, otherwise the script aborts;
+- an **existing release** for the tag is updated with `gh release upload --clobber` instead of
+  failing — re-running a release is safe and idempotent.
+
+### Doing it by hand (fallback)
+
+```bash
+cd app
 npm ci
-scripts/prepare-android-studio.sh         # = prebuild --clean + local-only settings
-# …or, if you want to do it by hand (then make sure the Gradle daemon runs on 17/21):
-npx expo prebuild --platform android --clean
-
-# 2. build, signed with your local keystore (kept outside the repo, or at the repo root — it is git-ignored)
-export KEYSTORE_PATH="/absolute/path/to/release.keystore"
+npx expo prebuild --platform android --clean --no-install   # applies plugins/withGradleJvmArgs
+export KEYSTORE_PATH="/absolute/path/to/release.keystore"   # outside the repo, or at its root (git-ignored)
 export KEYSTORE_PASSWORD="<STORE_PASSWORD>"
 export KEY_ALIAS="raw-radio"
 export KEY_PASSWORD="<STORE_PASSWORD>"
 
 cd android
 ./gradlew assembleRelease \
+  -x lint -x lintVitalRelease -x lintVitalAnalyzeRelease -x lintVitalReportRelease \
   -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
   -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
   -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
   -Pandroid.injected.signing.key.password="$KEY_PASSWORD" \
   -Pandroid.injected.signing.store.type=pkcs12 \
-  -PreactNativeArchitectures=arm64-v8a
+  -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
 
-# 3. result
-# app/build/outputs/apk/release/app-release.apk
+cd .. && scripts/verify-apk.sh --apk android/app/build/outputs/apk/release/app-release.apk \
+  --keystore "$KEYSTORE_PATH" --storepass "$KEYSTORE_PASSWORD" --alias "$KEY_ALIAS"
 ```
 
 For a debug build (no keystore needed): `npm run android` or
@@ -222,31 +296,66 @@ For a debug build (no keystore needed): `npm run android` or
 Check the signature of any APK:
 
 ```bash
+scripts/verify-apk.sh --apk app-release.apk          # structure + signer, no keystore needed
 "$ANDROID_HOME"/build-tools/<version>/apksigner verify --print-certs app-release.apk
 ```
 
 ---
 
-## 6. APK size
+## 6. APK size, R8 and resource shrinking
 
-Reference: a **debug** APK is ≈226 MB — it contains every ABI (`armeabi-v7a`, `arm64-v8a`,
-`x86`, `x86_64`), unstripped native libraries and no resource shrinking.
+Measured locally (Expo SDK 57, this app, release build, `-PreactNativeArchitectures` as noted):
 
-The release config already shrinks it:
+| Variant | Size |
+|---------|------|
+| debug, all 4 ABIs, unstripped | ≈226 MB |
+| release, `arm64-v8a` only | ≈49 MB |
+| release, `armeabi-v7a,arm64-v8a` (what CI/local publish) | **≈64 MB** |
 
-- CI builds only `armeabi-v7a,arm64-v8a` (`-PreactNativeArchitectures=…`) — `x86`/`x86_64`
+What takes the space (uncompressed entries of the universal APK): `classes*.dex` ≈51 MB
+(5 dex files — the Java/Kotlin code of all native modules), `lib/` ≈36 MB (native `.so`),
+`res/` ≈6 MB, `assets/index.android.bundle` ≈3.6 MB (Hermes bytecode).
+
+The release config already shrinks the APK:
+
+- CI/local builds only `armeabi-v7a,arm64-v8a` (`-PreactNativeArchitectures=…`) — `x86`/`x86_64`
   only matter for emulators, so they are dropped from release builds.
+- AAPT2 PNG crunching is on (`android.enablePngCrunchInReleaseBuilds=true`).
 
 Options for further reduction:
 
 | Goal | How |
 |------|-----|
-| Smallest single APK (modern devices only, arm64) | add `-PreactNativeArchitectures=arm64-v8a` to the Gradle command |
-| One APK per ABI (arm64 ≈ half the universal size) | ABI splits. Not enabled by default; the generated `build.gradle` has to be extended, which — because `android/` is regenerated — means a local Expo config plugin (`withAppBuildGradle`) that injects into `android { … }`:<br>`splits { abi { isEnable = true; reset(); isUniversalApk = false; include("arm64-v8a", "armeabi-v7a") } }` |
+| Smaller single APK (modern devices only, arm64) | `-PreactNativeArchitectures=arm64-v8a` (≈49 MB, but 32-bit-only devices can no longer install) |
+| One APK per ABI | ABI splits. Not enabled by default; the generated `build.gradle` has to be extended, which — because `android/` is regenerated — means a config plugin that injects into `android { … }`:<br>`splits { abi { isEnable = true; reset(); isUniversalApk = false; include("arm64-v8a", "armeabi-v7a") } }` |
 | Google Play upload (Play generates per-device splits itself) | `./gradlew bundleRelease` → `android/app/build/outputs/bundle/release/app-release.aab` |
-| Code/resource shrinking (R8) | add `-Pandroid.enableMinifyInReleaseBuilds=true -Pandroid.enableShrinkResourcesInReleaseBuilds=true`. **Not enabled in CI** — R8 can break reflection-heavy native modules (OneSignal, Track Player, Reanimated): test the resulting APK on a device before enabling it permanently |
+| Code/resource shrinking (R8) | `-Pandroid.enableMinifyInReleaseBuilds=true -Pandroid.enableShrinkResourcesInReleaseBuilds=true` — see below |
+
+**R8 is deliberately OFF for tag builds.** The dex files are the biggest chunk (≈51 MB
+uncompressed), so R8 would visibly help — but it rewrites every reflective call path, and this
+app leans on reflection-heavy modules (OneSignal, react-native-track-player, Reanimated, and
+Expo's module registry). A blind enable can produce an APK that builds, installs, and then
+crashes or silently loses push/playback.
+
+To test it without shipping it:
+
+```bash
+# manual run, artifact only — never published to a release
+Actions → RAW Radio App Release → Run workflow → r8: true
+```
+
+…or locally with the same two `-P` flags added to the Gradle command. Then, **before** enabling
+it for tags, verify on a real device (not just an emulator):
+
+1. cold start + navigation through every screen (`/`, `/copyright`, chat, substation switch);
+2. playback: start/pause/skip, background playback + notification controls (Track Player);
+3. push: receive a OneSignal push, tap it, check the deep link;
+4. JSI/Reanimated animations (agenda/chat) — no `Cannot read property of undefined` from
+   stripped classes;
+5. `adb logcat | grep -iE 'ClassNotFound|NoSuchMethod|No virtual method'` stays empty.
 
 The size and SHA-256 of every published APK are printed in the workflow summary.
+
 
 ---
 
@@ -261,6 +370,11 @@ The size and SHA-256 of every published APK are printed in the workflow summary.
 | `NDK not configured` / `No version of NDK matched` | bump `ANDROID_NDK_VERSION` in the workflow to the NDK version Expo SDK 57 pins (`node_modules/expo-modules-autolinking` → `ndkVersion`) |
 | `IllegalStateException: WARNING: A restricted method in java.lang.System has been called` | the Gradle daemon is running on JDK 24/25. CI uses Temurin 17; locally run `scripts/prepare-android-studio.sh` (see [`DEVELOPMENT.md`](./DEVELOPMENT.md) §3) |
 | `Cannot run program "node"` | local/IDE builds only — the Gradle daemon cannot see `node` on its `PATH`. See [`DEVELOPMENT.md`](./DEVELOPMENT.md) §4 |
+| `java.lang.OutOfMemoryError: Java heap space` during `lintVitalAnalyzeRelease` / `Unexpected failure during lint analysis` | the release lint gate on a 2 GiB daemon (Expo's default). CI skips lint (section 3.2) and raises `org.gradle.jvmargs` via `plugins/withGradleJvmArgs.js`; if it reappears in the workflow, the memory guard step fails in seconds with the reason |
+| `android/gradle.properties does not carry the expected org.gradle.jvmargs` | `plugins/withGradleJvmArgs.js` is no longer registered in `app.json`, or Expo changed its prebuild template — see the plugin's docstring and update both it and the workflow guard together |
+| `verify-apk: APK has no launchable-activity` / `aapt2 could not read the APK manifest` | the APK is truncated or the merge step broke — re-run with `--stacktrace` and inspect `:app:packageRelease` |
+| `verify-apk: APK is signed with the DEBUG keystore` | the `android.injected.signing.*` properties were not passed to Gradle (local: `scripts/release-local.sh` sets them; CI: check the secrets) |
+| CI ran a full build even though the release already existed | the tag/release race — the release gate still protected the asset; nothing to do, just ~20 wasted CI minutes |
 | `EXPO_PUBLIC_ONESIGNAL_APP_ID is not set (checked repository variable and repository secret)` | set it under Settings → Secrets and variables → Actions, as a **variable** (preferred) or a **secret** |
 | Build fails on `EXPO_PUBLIC_*` validation | set the repository variables, and make sure the API/WS URLs are public `https://` — never localhost |
 | The version in the release is unexpected | the tag (`app-vX.Y.Z`) wins over `app.json`; the workflow summary and release name print the effective version |

@@ -4,8 +4,26 @@
 #
 #  Usage:
 #    git tag app-v0.2.0 && git push origin --tags
+#    ...or build locally and publish the artifact you built — see docs/RELEASING.md §5
+#    (`scripts/release-local.sh`), which is the preferred flow.
 #
 #  Manual run (build only, no release): Actions → "RAW Radio App Release" → Run workflow
+#
+#  ── Local builds win (release idempotency) ────────────────────────────────
+#  `scripts/release-local.sh` builds the APK on the developer machine, then pushes the tag
+#  and creates the GitHub Release with that exact binary. Pushing the tag also triggers this
+#  workflow, which must therefore never clobber a release that already exists:
+#    • `preflight` job — if a release for the tag already exists, the whole build is skipped
+#      (saves ~20 CI minutes). It is best-effort: the tag is created a moment before the
+#      release object, so a slow runner could still see "no release yet".
+#    • `gate` step (right before publishing) — authoritative and race-free by construction:
+#      it re-checks after the ~20 min build and skips publishing, keeping the locally built
+#      artifact intact even if `preflight` missed.
+#  Failure mode we accept: if both guards were to fail (e.g. GitHub API outage at both
+#  moments), CI would publish its own APK of the same commit under the same asset name —
+#  same version, different SHA-256. The workflow summary prints the SHA-256 so a mismatch is
+#  detectable; the release notes are `generate_release_notes` (no locally written body to
+#  lose). Re-running the workflow after the API recovers restores the guard behaviour.
 #
 #  Required repository secrets (Settings → Secrets and variables → Actions → Secrets):
 #    ANDROID_KEYSTORE_BASE64  — base64 of the release keystore
@@ -39,6 +57,11 @@ on:
         description: 'Override version (X.Y.Z). Leave empty to keep app.json as is.'
         required: false
         default: ''
+      r8:
+        description: 'EXPERIMENTAL: build with R8 + resource shrinking (manual runs only, never tags). Smoke-test the artifact on a device — see docs/RELEASING.md §6.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -65,8 +88,40 @@ env:
   EXPO_NO_TELEMETRY: '1'
 
 jobs:
+  # Best-effort early exit so a locally published release does not cost ~20 CI minutes.
+  # This job ALWAYS runs (even for workflow_dispatch) so that `release` never depends on a
+  # skipped job — the job-level `needs` + `if` combination is subtle and easy to get wrong.
+  preflight:
+    name: Check for an existing release
+    runs-on: ubuntu-latest
+    outputs:
+      release_exists: ${{ steps.check.outputs.exists }}
+    steps:
+      - name: Look up a release for this tag
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Only `app-v*` tags can carry a release; manual runs have nothing to look up.
+          if [ "${GITHUB_REF_TYPE}" != "tag" ] || ! printf '%s' "$GITHUB_REF_NAME" | grep -Eq '^app-v'; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # `gh release view` exits 1 when there is no release (or no such tag).
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release $GITHUB_REF_NAME already exists — building it in CI would clobber the locally published APK. Skipping the build."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
   release:
     name: Build signed release APK
+    needs: [preflight]
+    # A failed preflight skips this job (Gradle never runs on a half-checked state); an
+    # existing release means a locally built artifact is already published and wins.
+    if: ${{ needs.preflight.outputs.release_exists != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -155,9 +210,27 @@ jobs:
           echo "ANDROID_NDK_HOME=$SDK/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
 
       # android/ is git-ignored and regenerated on every run (--clean), so it is never
-      # hand-edited: Expo prebuild rebuilds it from app.json.
+      # hand-edited: Expo prebuild rebuilds it from app.json. The daemon memory that used to
+      # OOM is applied by the local config plugin `plugins/withGradleJvmArgs` (registered in
+      # app.json), which runs inside prebuild and therefore survives --clean.
       - name: Prebuild Android project
         run: npx expo prebuild --platform android --clean --no-install
+
+      # Fail fast (seconds) instead of ~3 minutes into Gradle if the plugin stopped applying
+      # or Expo changed the template. Keep in sync with plugins/withGradleJvmArgs.js.
+      - name: Verify Gradle daemon memory settings
+        run: |
+          set -euo pipefail
+          grep -E '^org\.gradle\.jvmargs=' android/gradle.properties
+          if ! grep -Eq '^org\.gradle\.jvmargs=.*-Xmx6144m' android/gradle.properties; then
+            echo "::error::android/gradle.properties does not carry the expected org.gradle.jvmargs."
+            echo "::error::plugins/withGradleJvmArgs.js did not run — the release build would OOM."
+            exit 1
+          fi
+          if ! grep -Eq '^org\.gradle\.jvmargs=.*MaxMetaspaceSize=1024m' android/gradle.properties; then
+            echo "::error::org.gradle.jvmargs is missing -XX:MaxMetaspaceSize=1024m (lint OOMs on the 512m default)."
+            exit 1
+          fi
 
       # The keystore lives outside the workspace ($RUNNER_TEMP) and is decoded only for the
       # duration of the job. Note: it must be restored AFTER prebuild, because
@@ -199,6 +272,26 @@ jobs:
       # is required. The resulting signing config is named "externalOverride".
       #
       # `reactNativeArchitectures` drops the emulator-only x86/x86_64 ABIs → smaller APK.
+      #
+      # ── Lint is skipped ON PURPOSE (trade-off, read before removing) ──────────────
+      # `assembleRelease` also wires in the release-only Android Lint gate
+      # (`lintVitalRelease` → `lintVitalAnalyzeRelease`). It is *not* required for a working
+      # APK, it re-lints every one of the ~50 native modules, and on run 35212151391 it died
+      # with `java.lang.OutOfMemoryError: Java heap space` /
+      # `Unexpected failure during lint analysis (this is a bug in lint or one of the libraries
+      # it depends on)` — a known AGP/lint issue (google issuetracker 178631052) rather than a
+      # problem in this app. The Expo CLI skips lint for its own builds
+      # (`expo run:android` runs `assembleDebug -x lint -x test`), so this matches the tooling
+      # the project is developed with.
+      #
+      # What we LOSE: `lintVital` is the only automatic fatal-severity Android lint check in
+      # this repo. A fatal finding (e.g. a resource referenced but missing for one locale)
+      # would no longer fail CI and could reach a device. Compensating controls: the daemon
+      # memory fix above (so lint *can* run), the APK structure check (`aapt2 dump badging`)
+      # and the signature check in the next steps, plus installing the artifact on a device
+      # before announcing it (docs/RELEASING.md §3, step 5).
+      # To re-enable later: drop the `-x` flags, keep the raised `org.gradle.jvmargs`, and
+      # verify once on a runner before trusting it.
       - name: Build signed release APK
         working-directory: android
         env:
@@ -208,7 +301,23 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
+
+          # R8 / resource shrinking is OFF for tag builds: it must be validated on a real
+          # device first (reflection-heavy modules: OneSignal, Track Player, Reanimated).
+          # The manual `r8` input exists so that a candidate can be produced and tested
+          # without shipping it — see docs/RELEASING.md §6.
+          R8_FLAGS=()
+          if [ "${{ inputs.r8 }}" = "true" ]; then
+            echo "::warning::Building with R8 + resource shrinking (EXPERIMENTAL). Smoke-test the artifact before enabling this for tag builds."
+            R8_FLAGS+=(-Pandroid.enableMinifyInReleaseBuilds=true -Pandroid.enableShrinkResourcesInReleaseBuilds=true)
+          fi
+
           ./gradlew assembleRelease --stacktrace \
+            "${R8_FLAGS[@]}" \
+            -x lint \
+            -x lintVitalRelease \
+            -x lintVitalAnalyzeRelease \
+            -x lintVitalReportRelease \
             -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
             -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
@@ -216,7 +325,8 @@ jobs:
             -Pandroid.injected.signing.store.type="$ANDROID_KEYSTORE_TYPE" \
             -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
 
-      # Hard gate: the APK must be signed by the certificate inside the CI keystore.
+      # Hard gate: structure + signature. All checks live in scripts/verify-apk.sh so the
+      # local release flow (`scripts/release-local.sh`) runs exactly the same code.
       - name: Verify signature and collect APK
         id: apk
         env:
@@ -230,49 +340,27 @@ jobs:
             exit 1
           fi
 
-          APKSIGNER="$(ls -1 "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)"
-          if [ -z "$APKSIGNER" ]; then
-            echo "::error::apksigner not found in \$ANDROID_HOME/build-tools/*"
-            exit 1
-          fi
-
           # Stable asset name → https://github.com/raw-radio/raw-radio_app/releases/latest/download/raw-radio-universal.apk
           mkdir -p dist
           APK_NAME="raw-radio-universal.apk"
           cp "$APK_SRC" "dist/$APK_NAME"
 
-          echo "── apksigner verify ─────────────────────────────────"
-          "$APKSIGNER" verify --verbose "dist/$APK_NAME"
-          "$APKSIGNER" verify --print-certs "dist/$APK_NAME"
-
-          if "$APKSIGNER" verify --print-certs "dist/$APK_NAME" | grep -qi 'CN=Android Debug'; then
-            echo "::error::APK is signed with the DEBUG keystore — signing secrets are wrong/missing."
-            exit 1
-          fi
-
-          # The APK certificate must be the one from the release keystore.
-          norm() { tr -d ':' | tr '[:lower:]' '[:upper:]'; }
-          EXPECTED="$(keytool -list -v \
-              -keystore "$KEYSTORE_PATH" \
-              -storetype "$ANDROID_KEYSTORE_TYPE" \
-              -storepass "$KEYSTORE_PASSWORD" \
-              -alias "$KEY_ALIAS" | awk '/SHA256:/ {print $2; exit}')"
-          # apksigner prints "V2 Signer: certificate SHA-256 digest: <hex>" — the digest is
-          # the LAST ": "-separated field, not the second one (that is the label, which made
-          # this comparison fail even for a correctly signed APK). Take $NF.
-          ACTUAL="$("$APKSIGNER" verify --print-certs "dist/$APK_NAME" \
-              | awk -F': ' '/certificate SHA-256 digest/ {print $NF; exit}')"
-          if [ -z "$EXPECTED" ] || [ -z "$ACTUAL" ]; then
-            echo "::error::Could not read a certificate SHA-256 digest (keystore='$EXPECTED', apk='$ACTUAL')."
-            exit 1
-          fi
-          if [ "$(printf '%s' "$EXPECTED" | norm)" != "$(printf '%s' "$ACTUAL" | norm)" ]; then
-            echo "::error::APK signer ($ACTUAL) does not match the release keystore key ($EXPECTED)."
-            exit 1
-          fi
-
           VERSION="$(node -p "require('./app.json').expo.version")"
           VERSION_CODE="$(node -p "require('./app.json').expo.android.versionCode")"
+
+          echo "── verify-apk.sh (structure + signature) ────────────"
+          # `bash <script>` (not `./script`) so a lost executable bit cannot break the run.
+          bash scripts/verify-apk.sh \
+            --apk "dist/$APK_NAME" \
+            --keystore "$KEYSTORE_PATH" \
+            --storepass "$KEYSTORE_PASSWORD" \
+            --alias "$KEY_ALIAS" \
+            --storetype "$ANDROID_KEYSTORE_TYPE" \
+            --expect-version-code "$VERSION_CODE"
+          printf '── apksigner verify --print-certs ───────────────────\n'
+          "$(ls -1 "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"/build-tools/*/apksigner | sort -V | tail -1)" \
+            verify --print-certs "dist/$APK_NAME"
+
           SHA256="$(sha256sum "dist/$APK_NAME" | awk '{print $1}')"
           SIZE="$(du -h "dist/$APK_NAME" | awk '{print $1}')"
 
@@ -309,9 +397,27 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # Authoritative, race-free guard. `preflight` can be fooled by the milliseconds between
+      # the tag being pushed and the release object appearing; ~20 minutes later it cannot.
+      # If a release for this tag already exists (published from a local build), we keep it
+      # untouched and only the workflow artifact above is produced.
+      - name: Gate — do not clobber an existing release
+        id: release_gate
+        if: startsWith(github.ref, 'refs/tags/app-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Release $GITHUB_REF_NAME already exists — CI keeps the existing (locally built) asset. Publishing skipped."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # Only tag pushes publish a release; manual runs stop after the artifact upload.
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/app-v')
+        if: startsWith(github.ref, 'refs/tags/app-v') && steps.release_gate.outputs.skip != 'true'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}

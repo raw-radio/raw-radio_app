@@ -2,6 +2,8 @@ node_modules/
 .expo/
 dist/
 web-build/
+# Local signed release APKs (scripts/release-local.sh) — never commit binaries.
+build-artifacts/
 expo-env.d.ts
 .env
 .env.local
