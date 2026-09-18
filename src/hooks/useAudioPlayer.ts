@@ -22,6 +22,16 @@ const STALL_TIMEOUT = 15000
 const NOW_PLAYING_FALLBACK = 'RAW Radio'
 
 /**
+ * Why `tryPlay()` was called. The literal is load-bearing: `'reconnect'` is
+ * armed only after an explicit failure (error state / stall watchdog), so it
+ * must ALWAYS take the destructive reset/add/play path — the fast path (which
+ * reuses an already-loaded queue) is skipped for it. A dead-but-open stream
+ * that RNTP still reports as `Playing` would otherwise be fast-pathed forever
+ * and never rebuilt, breaking stall recovery.
+ */
+type TryPlayReason = 'user-play' | 'stop-track' | 'reconnect' | 'slug-change'
+
+/**
  * Notification / lock-screen capabilities. Kept in sync with the events handled
  * by `src/services/trackPlayerService.ts` — never advertise a control the
  * playback service does not implement:
@@ -207,6 +217,13 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   const playbackStateRef = useRef<TrackPlayerState | undefined>(TrackPlayerState.None)
   // Whether the app is in the foreground; the watchdog stays quiet in background.
   const appActiveRef = useRef(true)
+  // Foreground-resume grace window. The `AppState` event and the watchdog timer
+  // are independent event sources, and the native state re-read on resume is
+  // async, so a tick that is already queued when the app returns could still run
+  // before that re-read settles. Any tick inside this window is skipped. The
+  // unconditional baseline rebase in the AppState handler is the primary fix for
+  // the post-resume false stall — this window is defence-in-depth, not the fix.
+  const resumeGraceUntilRef = useRef(0)
 
   const buildStreamUrl = useCallback((slug: string) => {
     const base = process.env.EXPO_PUBLIC_API_URL || ''
@@ -343,16 +360,49 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
       appActiveRef.current = nextState === 'active'
+      // Rebase the stall watchdog on EVERY transition, not only on the resumed
+      // path for an OS-paused player. While backgrounded `useProgress(250)`
+      // stops delivering position updates (its self-restarting `setTimeout`
+      // poll is frozen/throttled by the OS), so `lastProgressAtRef` is a whole
+      // background gap old by the time the app returns. Without an unconditional
+      // rebase the first watchdog tick after resume sees a stale baseline while
+      // the native state is still Playing (no state event was delivered to the
+      // suspended JS thread either), judges the just-resumed stream as stalled,
+      // and forces a full reset/add/play reconnect — the audible gap + loading
+      // flash this hook is meant to avoid.
+      lastProgressAtRef.current = Date.now()
+      if (nextState === 'active') {
+        // Skip the first watchdog tick after a resume: the interval runs on its
+        // own clock and the state re-read below is async, so a tick could run
+        // while the view is half-updated.
+        resumeGraceUntilRef.current = Date.now() + WATCHDOG_INTERVAL
+      }
+
       if (nextState !== 'active' || !isPlayingRef.current) return
+      // Capture the loaded URL before the async re-read: if a station switch
+      // starts while we wait, this stale resume must not `play()` the queue that
+      // is being replaced.
+      const urlAtResume = currentUrlRef.current
       TrackPlayer.getPlaybackState()
         .then((playback) => {
+          // `usePlaybackState` fetches once on mount and then relies solely on
+          // `Event.PlaybackState`; events emitted while the JS thread was
+          // suspended never arrive, so re-seed the ref from the live player.
+          // This keeps the watchdog's state check and the slug-change effect's
+          // `intendsToPlay` honest right after a resume.
+          playbackStateRef.current = playback.state
           if (playback.state === TrackPlayerState.Paused) {
-            // Resuming from an OS-induced pause: the progress baseline may be a
-            // whole background gap old, and `useProgress` will not refresh it
-            // until the position actually changes. Without rebasing, the first
-            // watchdog tick would judge the just-resumed stream as stalled
-            // (STALL_TIMEOUT long gone) and force a full reconnect.
-            lastProgressAtRef.current = Date.now()
+            // A pause/stop that arrived during the async re-read must win: the
+            // user's intent (`isPlayingRef`) can flip to false between the
+            // handler entry above and this continuation, and resurrecting the
+            // transport would override the pause the user just issued. Likewise,
+            // a station switch started meanwhile leaves `currentUrlRef` pointing
+            // at a different URL, so playing this stale queue would fight the
+            // in-flight load.
+            if (!isPlayingRef.current || currentUrlRef.current !== urlAtResume) return
+            // OS-induced pause on an intent-to-play session: the baseline was
+            // just rebased above, so only restart the transport. Playing /
+            // Buffering / Loading must not be touched — they are already fine.
             return TrackPlayer.play()
           }
         })
@@ -645,7 +695,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   }, [])
 
   const tryPlay = useCallback(
-    async (url: string) => {
+    async (url: string, reason: TryPlayReason) => {
       // Invalidate any in-flight request: this one is now the newest.
       const requestId = ++playRequestRef.current
       // Playing intent: a kill must not stop the stream (see
@@ -656,6 +706,67 @@ export function useAudioPlayer(currentSlug: string | undefined) {
         // Never touch TrackPlayer before setupPlayer() resolves.
         if (setupPromiseRef.current) await setupPromiseRef.current
         if (requestId !== playRequestRef.current) return
+
+        // Fast path: if the stream this call asks for is ALREADY loaded and
+        // healthy, reset/add/play would only destroy and rebuild the native
+        // decoder (audible gap + loading flash) for no gain. This is what a
+        // resumed / already-playing stream hits. The probe is only attempted
+        // when it can possibly apply, and any probe failure falls through to the
+        // destructive load below (the safe default).
+        //
+        // The automatic retry (`reason === 'reconnect'`) is deliberately EXCLUDED:
+        // it is only armed after an explicit failure (error state / stall
+        // watchdog), so the loaded queue must be assumed unhealthy. A
+        // dead-but-open stream that RNTP still reports as Playing would
+        // otherwise be fast-pathed forever and never rebuilt — breaking the
+        // stall recovery this hook guarantees.
+        if (reason !== 'reconnect' && currentUrlRef.current === url && hasQueueRef.current) {
+          let nativeState: TrackPlayerState | undefined
+          let activeUrl: string | undefined
+          try {
+            const [playback, active] = await Promise.all([
+              TrackPlayer.getPlaybackState(),
+              TrackPlayer.getActiveTrack(),
+            ])
+            nativeState = playback.state
+            activeUrl = active?.url
+          } catch {
+            // Probe unavailable — fall through to the destructive path.
+          }
+          if (requestId !== playRequestRef.current) return
+
+          const isLoadedAndHealthy =
+            activeUrl === url &&
+            (nativeState === TrackPlayerState.Playing ||
+              nativeState === TrackPlayerState.Buffering ||
+              nativeState === TrackPlayerState.Paused)
+
+          if (isLoadedAndHealthy) {
+            // Re-assert the play intent without touching the queue. The queue /
+            // tray are intact (`reset()` is skipped), so `hasQueueRef` and
+            // `publishedNowPlayingRef` are deliberately left as they are.
+            currentUrlRef.current = url
+            isPlayingRef.current = true
+            playbackStateRef.current = nativeState
+
+            if (nativeState === TrackPlayerState.Paused) {
+              // Only the transport action was missing; resume the loaded
+              // stream. This is a genuine fresh playback segment, so it gets a
+              // full stall budget and its own progress evidence.
+              lastProgressAtRef.current = Date.now()
+              progressSeenRef.current = false
+              await TrackPlayer.play()
+              if (requestId !== playRequestRef.current) return
+              setState('playing')
+            } else {
+              // Already playing/buffering: leave the watchdog baseline and
+              // `progressSeenRef` untouched so a genuinely frozen stream stays
+              // detectable (the watchdog recovers it via a destructive retry).
+              setState(nativeState === TrackPlayerState.Buffering ? 'buffering' : 'playing')
+            }
+            return
+          }
+        }
 
         currentUrlRef.current = url
         isPlayingRef.current = true
@@ -710,7 +821,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     const slug = currentSlug || 'main'
     savedSlugRef.current = slug
     const url = buildStreamUrl(slug)
-    await tryPlay(url)
+    await tryPlay(url, 'user-play')
   }, [currentSlug, buildStreamUrl, tryPlay, currentTrack])
 
   const pause = useCallback(async () => {
@@ -824,7 +935,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
 
     const slug = savedSlugRef.current
     const url = buildStreamUrl(slug)
-    await tryPlay(url)
+    await tryPlay(url, 'stop-track')
   }, [buildStreamUrl, tryPlay])
 
   // When track ends, return to radio
@@ -884,7 +995,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       retryTimerRef.current = setTimeout(() => {
         const slug = currentSlug || 'main'
         const url = buildStreamUrl(slug)
-        tryPlay(url)
+        tryPlay(url, 'reconnect')
       }, delay)
 
       if (retryCountRef.current > 3) {
@@ -917,6 +1028,10 @@ export function useAudioPlayer(currentSlug: string | undefined) {
       if (!isPlayingRef.current || modeRef.current === 'track') return
       if (!appActiveRef.current) return
       if (retryTimerRef.current) return
+      // Grace window right after a foreground resume (see the AppState handler):
+      // the resumed stream has not had a chance to report progress again, and
+      // the native state re-read there is async. Skip the first tick.
+      if (Date.now() < resumeGraceUntilRef.current) return
 
       if (Date.now() - lastProgressAtRef.current <= STALL_TIMEOUT) return
 
@@ -996,7 +1111,7 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     if (currentUrlRef.current === url) return
 
     // `tryPlay` awaits setup itself, so no pre-setup deferral is needed.
-    void tryPlay(url)
+    void tryPlay(url, 'slug-change')
   }, [currentSlug, buildStreamUrl, tryPlay, intendsToPlay])
 
   return {
