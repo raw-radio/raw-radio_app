@@ -486,7 +486,6 @@ const styles = StyleSheet.create({
     width: '100%',
     paddingHorizontal: 16,
     paddingTop: 4,
-    paddingBottom: 8,
     alignItems: 'flex-end',
   },
   // Plain text link — deliberately quieter than any button: no background, no
@@ -497,7 +496,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingVertical: 4,
   },
   downloadLinkText: {
     color: '#b3b3b3',

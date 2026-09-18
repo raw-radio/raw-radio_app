@@ -30,7 +30,7 @@ const PLAY_BUTTON_SIZE = 140
  * Deliberately 2× the old 48 — the glyph now reads at roughly 0.69 of the
  * button diameter (`96/140`). Do not "fix" it back down to 48.
  */
-const PLAY_ICON_SIZE = 96
+const PLAY_ICON_SIZE = 75
 const RING_DURATION_MS = 2000
 /**
  * CSS `animation-delay` per ring: 0s / 0.6s / 1.2s. Kept in ms as the verbatim
@@ -276,7 +276,6 @@ const styles = StyleSheet.create({
     maxWidth: '100%',
     paddingHorizontal: 16,
     marginTop: 40,
-    marginBottom: 24,
   },
   playButtonWrap: {
     width: PLAY_BUTTON_SIZE,

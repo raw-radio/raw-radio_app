@@ -3,7 +3,7 @@ import { Platform, ScrollView, StyleSheet, Text, TouchableOpacity } from 'react-
 import type { SubstationInfo } from '../hooks/useSubstations'
 import { SubstationIcon } from './SubstationIcon'
 
-const CARD_ICON_SIZE = 36
+const CARD_ICON_SIZE = 32
 const ICON_RESTING_COLOR = '#FFFFF0'
 
 interface Props {
