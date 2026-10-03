@@ -12,7 +12,10 @@
 #      (a truncated/empty APK passes `apksigner verify` on some build-tools versions, and
 #      `assembleRelease` no longer runs `lintVital` — see the workflow comment);
 #   3. it is signed, and NOT with the Android debug key;
-#   4. when --keystore is given, the signing certificate's SHA-256 equals the keystore key's.
+#   4. when --keystore is given, the signing certificate's SHA-256 equals the keystore key's;
+#   5. the JS bundle (`assets/index.android.bundle`) contains the production host and NO local
+#      URL (localhost/10.0.2.2/…). This is the backstop against the app-v0.2.0 regression,
+#      where a developer's `.env.local` leaked http://localhost:3001 into the shipped APK.
 #
 # Usage:
 #   scripts/verify-apk.sh --apk dist/raw-radio-universal.apk
@@ -28,6 +31,8 @@
 #   --alias NAME                           key alias inside the keystore
 #   --storetype TYPE                       pkcs12 (default) or jks
 #   --expect-version-code N                fail unless versionCode == N
+#   --expect-bundle-host HOST              host the bundle must contain (default raw-radio.ru;
+#                                          empty string disables the positive check)
 #   --apksigner PATH, --aapt2 PATH         override tool lookup
 #   -h | --help
 #
@@ -46,6 +51,8 @@ STOREPASS_ENV=""
 ALIAS=""
 STORETYPE="pkcs12"
 EXPECT_VERSION_CODE=""
+# Host that must appear in the JS bundle; set to an empty string to disable the positive check.
+EXPECT_BUNDLE_HOST="${EXPECT_BUNDLE_HOST:-raw-radio.ru}"
 APKSIGNER_OVERRIDE=""
 AAPT2_OVERRIDE=""
 
@@ -72,6 +79,8 @@ while [ "$#" -gt 0 ]; do
     --storetype=*) STORETYPE="${1#--storetype=}"; shift ;;
     --expect-version-code) opt_value "--expect-version-code" "$#"; EXPECT_VERSION_CODE="$2"; shift 2 ;;
     --expect-version-code=*) EXPECT_VERSION_CODE="${1#--expect-version-code=}"; shift ;;
+    --expect-bundle-host) opt_value "--expect-bundle-host" "$#"; EXPECT_BUNDLE_HOST="$2"; shift 2 ;;
+    --expect-bundle-host=*) EXPECT_BUNDLE_HOST="${1#--expect-bundle-host=}"; shift ;;
     --apksigner) opt_value "--apksigner" "$#"; APKSIGNER_OVERRIDE="$2"; shift 2 ;;
     --apksigner=*) APKSIGNER_OVERRIDE="${1#--apksigner=}"; shift ;;
     --aapt2) opt_value "--aapt2" "$#"; AAPT2_OVERRIDE="$2"; shift 2 ;;
@@ -192,3 +201,36 @@ else
 fi
 
 printf 'apk-cert-sha256=%s\n' "$(printf '%s' "$ACTUAL" | norm)"
+
+# ─── 5. JS bundle content — production host present, no local/dev URL ───────
+# Root cause of the app-v0.2.0 regression: a developer's git-ignored `.env.local` held
+# `EXPO_PUBLIC_API_URL=http://localhost:3001`, which babel-preset-expo inlined into
+# `assets/index.android.bundle`. `apksigner` cannot see that, so this step inspects the
+# artifact itself. It is shared by CI and `release-local.sh`, so a leaked bundle can never
+# be published by either path. Works on plain JS *and* Hermes bytecode (URLs live in the
+# string table). The scan is skipped (with a note) if `unzip` is unavailable.
+BUNDLE_FORBIDDEN_RE='localhost|127\.0\.0\.1|0\.0\.0\.0|10\.0\.2\.2|host\.docker\.internal'
+
+if command -v unzip > /dev/null 2>&1; then
+  BUNDLE_TMP="$(mktemp)"
+  trap 'rm -f "$BUNDLE_TMP"' EXIT
+  if unzip -p "$APK" assets/index.android.bundle > "$BUNDLE_TMP" 2>/dev/null && [ -s "$BUNDLE_TMP" ]; then
+    if grep -Eq "$BUNDLE_FORBIDDEN_RE" "$BUNDLE_TMP"; then
+      printf 'verify-apk: assets/index.android.bundle contains a local/dev URL — the APK would not reach production:\n' >&2
+      grep -Eo "$BUNDLE_FORBIDDEN_RE" "$BUNDLE_TMP" | sort -u | sed 's/^/    /' >&2 || true
+      die "local URL baked into the JS bundle — check app/.env.local and EXPO_PUBLIC_* (release-local.sh forces https://raw-radio.ru)"
+    fi
+    if [ -n "$EXPECT_BUNDLE_HOST" ] && ! grep -qF "$EXPECT_BUNDLE_HOST" "$BUNDLE_TMP"; then
+      die "assets/index.android.bundle does not contain '$EXPECT_BUNDLE_HOST' — the release would ship without the production API host"
+    fi
+    if [ -n "$EXPECT_BUNDLE_HOST" ]; then
+      printf 'apk-bundle=OK (no local URLs; %s present)\n' "$EXPECT_BUNDLE_HOST" >&2
+    else
+      printf 'apk-bundle=OK (no local URLs; positive host check disabled)\n' >&2
+    fi
+  else
+    printf 'verify-apk: note: assets/index.android.bundle not found in APK — bundle URL scan skipped\n' >&2
+  fi
+else
+  printf 'verify-apk: note: unzip not available — bundle URL scan skipped\n' >&2
+fi

@@ -22,6 +22,15 @@
 #   scripts/release-local.sh --notes-file=NOTES.md  # release body instead of generated notes
 #   scripts/release-local.sh --yes                  # no confirmation prompts
 #
+# Production env (never localhost)
+# --------------------------------
+# Before bundling, this script resolves EXPO_PUBLIC_API_URL / EXPO_PUBLIC_WS_URL from
+# `app/.env` (default https://raw-radio.ru) and exports them, so a stray git-ignored
+# `.env.local` cannot leak a local URL into the release. `scripts/check-release-env.sh`
+# refuses to run while `.env.local` holds a localhost/10.0.2.2 value, and
+# `scripts/verify-apk.sh` scans the built `assets/index.android.bundle` and fails the release
+# if a local URL still made it through (the app-v0.2.0 regression).
+#
 # Credentials (hidden prompt — but one consumer still puts them in argv: see below)
 # ---------------------------------------------------------------------------------
 # Exported by you, or typed when prompted (input is hidden, nothing lands in shell history):
@@ -159,6 +168,21 @@ info "ABIs    : $ABIS"
 info "Repo    : $REPO"
 [ "$PUBLISH" -eq 1 ] || info "Publish : no (--no-publish)"
 echo ""
+
+# ─── 3b. Prod env guard — a release must never bake a local URL ──────────────
+# `.env.local` outranks `.env` in Expo's dotenv loader, so a stale local override is inlined
+# into the JS bundle (the app-v0.2.0 incident: EXPO_PUBLIC_API_URL=http://localhost:3001 —
+# no substations beyond `main`, no audio, no chat socket). Resolve the production URLs here
+# and EXPORT them: an existing shell variable wins over every `.env*` file, so the bundle is
+# correct even if a local override reappears. `check-release-env.sh` additionally hard-fails
+# while `.env.local` still contains a localhost/10.0.2.2 value, and `verify-apk.sh` re-checks
+# the built bundle as a backstop.
+GUARD_VARS="$(scripts/check-release-env.sh)" || die "release env guard failed — fix the URL above and retry"
+while IFS=$'\t' read -r key value; do
+  [ -n "$key" ] || continue
+  export "$key=$value"
+done <<< "$GUARD_VARS"
+ok "release env: EXPO_PUBLIC_API_URL=$EXPO_PUBLIC_API_URL  EXPO_PUBLIC_WS_URL=$EXPO_PUBLIC_WS_URL"
 
 # ─── 4. app.json mutation (CI-parity), restored on exit ─────────────────────
 APP_JSON_BACKUP="$(mktemp)"
