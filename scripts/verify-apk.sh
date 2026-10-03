@@ -209,15 +209,22 @@ printf 'apk-cert-sha256=%s\n' "$(printf '%s' "$ACTUAL" | norm)"
 # artifact itself. It is shared by CI and `release-local.sh`, so a leaked bundle can never
 # be published by either path. Works on plain JS *and* Hermes bytecode (URLs live in the
 # string table). The scan is skipped (with a note) if `unzip` is unavailable.
-BUNDLE_FORBIDDEN_RE='localhost|127\.0\.0\.1|0\.0\.0\.0|10\.0\.2\.2|host\.docker\.internal'
+#
+# Detection is URL-shaped (scheme + local host + optional port) rather than a bare "localhost"
+# substring: every RN bundle legitimately carries Metro's `http://localhost:8081` default
+# (whitelisted below), so a naive substring match would false-positive on a correct build.
+# The inlined EXPO_PUBLIC_API_URL/WS keep their scheme, so the 0.2.0 leak is matched exactly.
+BUNDLE_LOCAL_URL_RE='(https?|wss?)://(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.0\.2\.2|host\.docker\.internal)(:[0-9]+)?'
 
 if command -v unzip > /dev/null 2>&1; then
   BUNDLE_TMP="$(mktemp)"
   trap 'rm -f "$BUNDLE_TMP"' EXIT
   if unzip -p "$APK" assets/index.android.bundle > "$BUNDLE_TMP" 2>/dev/null && [ -s "$BUNDLE_TMP" ]; then
-    if grep -Eq "$BUNDLE_FORBIDDEN_RE" "$BUNDLE_TMP"; then
+    # `|| true`: with `set -o pipefail`, an empty grep result makes the pipeline exit 1.
+    LOCAL_URLS="$(grep -aoE "$BUNDLE_LOCAL_URL_RE" "$BUNDLE_TMP" | grep -vE '://localhost:8081$' | sort -u || true)"
+    if [ -n "$LOCAL_URLS" ]; then
       printf 'verify-apk: assets/index.android.bundle contains a local/dev URL — the APK would not reach production:\n' >&2
-      grep -Eo "$BUNDLE_FORBIDDEN_RE" "$BUNDLE_TMP" | sort -u | sed 's/^/    /' >&2 || true
+      printf '%s\n' "$LOCAL_URLS" | sed 's/^/    /' >&2
       die "local URL baked into the JS bundle — check app/.env.local and EXPO_PUBLIC_* (release-local.sh forces https://raw-radio.ru)"
     fi
     if [ -n "$EXPECT_BUNDLE_HOST" ] && ! grep -qF "$EXPECT_BUNDLE_HOST" "$BUNDLE_TMP"; then
