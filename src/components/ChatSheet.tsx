@@ -14,7 +14,7 @@ import Animated, {
 import { Ionicons } from '@expo/vector-icons'
 import * as ImagePicker from 'expo-image-picker'
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator'
-import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { storage, STORAGE_KEYS } from '../hooks/useStorage'
 import { COLUMN_MAX_WIDTH, ColumnHeightContext, useAppFrame } from '../utils/layout'
 import type { ChatMessageDTO } from '../hooks/useChat'
@@ -34,6 +34,14 @@ const BACKDROP_MAX_OPACITY = 0.5
 const SHEET_MAX_HEIGHT_RATIO = 0.8
 /** Desktop cap for the framed web layout — mirrors web `.chat-sheet` `@media (min-width: 768px)`. */
 const SHEET_DESKTOP_MAX_HEIGHT = 600
+
+/**
+ * Android bottom inset (dp) used when the modal window reports no navigation-bar
+ * inset. 24dp covers the gesture-navigation pill; 3-button navigation (~48dp) is
+ * reported correctly once the modal window is edge-to-edge — this is only a
+ * floor so `insets.bottom === 0` can never collapse the input onto the nav bar.
+ */
+const ANDROID_MIN_BOTTOM_INSET = 24
 
 interface SelectedImage {
   uri: string
@@ -122,10 +130,11 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
   const API_BASE = process.env.EXPO_PUBLIC_API_URL || ''
 
   // This sheet lives inside a `Modal` — its own native window — so the root
-  // `SafeAreaView` in `app/app/_layout.tsx` (which insets the main content) does
-  // NOT reach it. Without this, the Android navigation/gesture bar overlaps the
-  // input row. On web `insets.bottom` is 0, so the padding stays as authored.
-  const insets = useSafeAreaInsets()
+  // `SafeAreaProvider` in `app/app/_layout.tsx` measures the *main* window, not
+  // this dialog. The modal content is wrapped in its own `SafeAreaProvider`
+  // below, and the bottom inset is consumed by `ChatInputArea` (a child of that
+  // provider) instead of here — reading it at this level would give the wrong
+  // window's metrics.
 
   // One shared progress value (0 = hidden, 1 = fully open) drives both layers:
   // the backdrop only fades, the sheet slides up + fades. `mounted` keeps the
@@ -374,143 +383,173 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
       animationType="none"
       onRequestClose={requestClose}
       statusBarTranslucent
+      // Makes the modal's own Android window edge-to-edge (draws under the
+      // navigation bar). Without it the dialog window is already inset above the
+      // nav bar and reports a 0 bottom inset, which is why the input row was
+      // hidden. Requires `statusBarTranslucent` above.
+      navigationBarTranslucent
     >
-      <View style={[styles.root, framed && styles.rootFramed]}>
-        {/* Backdrop — fades in/out, never slides. */}
-        <Animated.View pointerEvents="none" style={[styles.backdrop, backdropStyle]} />
-        <Pressable
-          style={StyleSheet.absoluteFill}
-          onPress={requestClose}
-          accessibilityRole="button"
-          accessibilityLabel="Закрыть чат"
-        />
+      {/* Modal = a separate native window, so the app-root provider does not
+          measure it. A nested provider at the modal root is the documented fix;
+          `ChatInputArea` reads the bottom inset from it. */}
+      <SafeAreaProvider>
+        <View style={[styles.root, framed && styles.rootFramed]}>
+          {/* Backdrop — fades in/out, never slides. */}
+          <Animated.View pointerEvents="none" style={[styles.backdrop, backdropStyle]} />
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={requestClose}
+            accessibilityRole="button"
+            accessibilityLabel="Закрыть чат"
+          />
 
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={[
-            framed ? styles.drawerContainerFramed : styles.drawerContainerFull,
-            // RN Web portals `Modal` to `document.body`, i.e. outside the
-            // framed card. Sizing this box to the measured card height and
-            // centring it (`rootFramed`) lines the sheet's bottom edge up with
-            // the card's bottom edge, so the sheet sits inside the frame
-            // instead of the viewport. Falls back to content height until the
-            // card has been measured.
-            framed && columnHeight != null ? { height: columnHeight } : null,
-          ]}
-          pointerEvents="box-none"
-        >
-          <TouchableWithoutFeedback onPress={() => {}}>
-            <Animated.View
-              style={[
-                styles.drawer,
-                framed && styles.drawerFramed,
-                { maxHeight: sheetMaxHeight },
-                sheetStyle,
-              ]}
-            >
-              <View style={styles.header}>
-                <Text style={styles.title}>💬 Chat</Text>
-                <TouchableOpacity
-                  onPress={requestClose}
-                  style={styles.closeBtn}
-                  accessibilityRole="button"
-                  accessibilityLabel="Закрыть чат"
-                >
-                  <Ionicons name="close" size={20} color="#aaa" />
-                </TouchableOpacity>
-              </View>
-
-              <FlatList
-                ref={flatListRef}
-                data={messages}
-                keyExtractor={(item) => item.id}
-                renderItem={renderMessage}
-                style={[styles.messagesList, { maxHeight: sheetMaxHeight }]}
-                ListEmptyComponent={
-                  <View style={styles.emptyState}>
-                    <Text style={styles.emptyText}>No messages yet. Be the first!</Text>
-                  </View>
-                }
-              />
-
-              {/* Bottom padding carries the device inset on top of the sheet's
-                  own 12px, so the input clears the nav bar. Applied to the
-                  input area (not the drawer) because they share the background:
-                  the fill still reaches the screen edge, only the content lifts. */}
-              <View style={[styles.inputArea, { paddingBottom: insets.bottom + 12 }]}>
-                <TextInput
-                  style={[styles.nicknameInput, nicknameError && styles.inputError]}
-                  placeholder="Your name"
-                  placeholderTextColor="#666"
-                  value={nickname}
-                  onChangeText={handleNicknameChange}
-                  maxLength={30}
-                  autoCorrect={false}
-                />
-                {nicknameError && <Text style={styles.fieldError}>{nicknameError}</Text>}
-
-                <View style={styles.inputRow}>
-                  <TextInput
-                    style={styles.textInput}
-                    placeholder="Message..."
-                    placeholderTextColor="#666"
-                    value={text}
-                    onChangeText={setText}
-                    maxLength={MAX_TEXT_LENGTH}
-                    multiline
-                    editable={!sending}
-                  />
-                  <Text style={styles.charCounter}>{text.length}/{MAX_TEXT_LENGTH}</Text>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={[
+              framed ? styles.drawerContainerFramed : styles.drawerContainerFull,
+              // RN Web portals `Modal` to `document.body`, i.e. outside the
+              // framed card. Sizing this box to the measured card height and
+              // centring it (`rootFramed`) lines the sheet's bottom edge up with
+              // the card's bottom edge, so the sheet sits inside the frame
+              // instead of the viewport. Falls back to content height until the
+              // card has been measured.
+              framed && columnHeight != null ? { height: columnHeight } : null,
+            ]}
+            pointerEvents="box-none"
+          >
+            <TouchableWithoutFeedback onPress={() => {}}>
+              <Animated.View
+                style={[
+                  styles.drawer,
+                  framed && styles.drawerFramed,
+                  { maxHeight: sheetMaxHeight },
+                  sheetStyle,
+                ]}
+              >
+                <View style={styles.header}>
+                  <Text style={styles.title}>💬 Chat</Text>
                   <TouchableOpacity
-                    onPress={handlePickImages}
-                    disabled={imagesDisabled}
-                    style={[styles.imageBtn, imagesDisabled && { opacity: 0.5 }]}
+                    onPress={requestClose}
+                    style={styles.closeBtn}
+                    accessibilityRole="button"
+                    accessibilityLabel="Закрыть чат"
                   >
-                    {processing ? (
-                      <ActivityIndicator size="small" color="#ff6b35" />
-                    ) : (
-                      <Ionicons name="image-outline" size={20} color="#ff6b35" />
-                    )}
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    onPress={handleSubmit}
-                    disabled={isSendDisabled}
-                    style={[styles.sendBtn, isSendDisabled && { opacity: 0.5 }]}
-                  >
-                    {sending ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="send" size={18} color="#fff" />}
+                    <Ionicons name="close" size={20} color="#aaa" />
                   </TouchableOpacity>
                 </View>
 
-                {selectedImages.length > 0 && (
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    style={styles.previewStrip}
-                    contentContainerStyle={styles.previewStripContent}
-                  >
-                    {selectedImages.map((img, i) => (
-                      <View key={`${img.uri}-${i}`} style={styles.previewItem}>
-                        <Image source={{ uri: img.uri }} style={styles.previewImage} />
-                        <TouchableOpacity onPress={() => handleRemoveImage(i)} style={styles.previewRemove}>
-                          <Ionicons name="close" size={12} color="#fff" />
-                        </TouchableOpacity>
-                      </View>
-                    ))}
-                  </ScrollView>
-                )}
+                <FlatList
+                  ref={flatListRef}
+                  data={messages}
+                  keyExtractor={(item) => item.id}
+                  renderItem={renderMessage}
+                  style={[styles.messagesList, { maxHeight: sheetMaxHeight }]}
+                  ListEmptyComponent={
+                    <View style={styles.emptyState}>
+                      <Text style={styles.emptyText}>No messages yet. Be the first!</Text>
+                    </View>
+                  }
+                />
 
-                {statusMessage && (
-                  <Text style={[styles.statusMsg, statusMessage.type === 'error' ? { color: '#ff4444' } : { color: '#2ECC71' }]}>
-                    {statusMessage.message}
-                  </Text>
-                )}
-              </View>
-            </Animated.View>
-          </TouchableWithoutFeedback>
-        </KeyboardAvoidingView>
-      </View>
+                {/* Bottom padding carries the modal window's inset on top of the
+                    sheet's own 12px, so the input clears the nav bar. Applied to
+                    the input area (not the drawer) because they share the
+                    background: the fill still reaches the screen edge, only the
+                    content lifts. `ChatInputArea` reads the inset from the nested
+                    provider above. */}
+                <ChatInputArea>
+                  <TextInput
+                    style={[styles.nicknameInput, nicknameError && styles.inputError]}
+                    placeholder="Your name"
+                    placeholderTextColor="#666"
+                    value={nickname}
+                    onChangeText={handleNicknameChange}
+                    maxLength={30}
+                    autoCorrect={false}
+                  />
+                  {nicknameError && <Text style={styles.fieldError}>{nicknameError}</Text>}
+
+                  <View style={styles.inputRow}>
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder="Message..."
+                      placeholderTextColor="#666"
+                      value={text}
+                      onChangeText={setText}
+                      maxLength={MAX_TEXT_LENGTH}
+                      multiline
+                      editable={!sending}
+                    />
+                    <Text style={styles.charCounter}>{text.length}/{MAX_TEXT_LENGTH}</Text>
+                    <TouchableOpacity
+                      onPress={handlePickImages}
+                      disabled={imagesDisabled}
+                      style={[styles.imageBtn, imagesDisabled && { opacity: 0.5 }]}
+                    >
+                      {processing ? (
+                        <ActivityIndicator size="small" color="#ff6b35" />
+                      ) : (
+                        <Ionicons name="image-outline" size={20} color="#ff6b35" />
+                      )}
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={handleSubmit}
+                      disabled={isSendDisabled}
+                      style={[styles.sendBtn, isSendDisabled && { opacity: 0.5 }]}
+                    >
+                      {sending ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="send" size={18} color="#fff" />}
+                    </TouchableOpacity>
+                  </View>
+
+                  {selectedImages.length > 0 && (
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      style={styles.previewStrip}
+                      contentContainerStyle={styles.previewStripContent}
+                    >
+                      {selectedImages.map((img, i) => (
+                        <View key={`${img.uri}-${i}`} style={styles.previewItem}>
+                          <Image source={{ uri: img.uri }} style={styles.previewImage} />
+                          <TouchableOpacity onPress={() => handleRemoveImage(i)} style={styles.previewRemove}>
+                            <Ionicons name="close" size={12} color="#fff" />
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                    </ScrollView>
+                  )}
+
+                  {statusMessage && (
+                    <Text style={[styles.statusMsg, statusMessage.type === 'error' ? { color: '#ff4444' } : { color: '#2ECC71' }]}>
+                      {statusMessage.message}
+                    </Text>
+                  )}
+                </ChatInputArea>
+              </Animated.View>
+            </TouchableWithoutFeedback>
+          </KeyboardAvoidingView>
+        </View>
+      </SafeAreaProvider>
     </Modal>
   )
+}
+
+/**
+ * Chat input row with a safe-area-aware bottom inset.
+ *
+ * Must be rendered *inside* the modal's own `SafeAreaProvider` (see `ChatSheet`),
+ * so `useSafeAreaInsets()` reads the modal window's insets rather than the root
+ * window's. On Android the modal is edge-to-edge (`navigationBarTranslucent`) and
+ * normally reports the navigation-bar inset; `Math.max` with
+ * `ANDROID_MIN_BOTTOM_INSET` is the safety net for the moment before the dialog
+ * window reports its metrics. On web `insets.bottom` is 0, so the padding stays
+ * exactly as authored (12px), and framed desktop is unaffected.
+ */
+function ChatInputArea({ children }: { children: React.ReactNode }) {
+  const insets = useSafeAreaInsets()
+  const bottomInset =
+    Platform.OS === 'android' ? Math.max(insets.bottom, ANDROID_MIN_BOTTOM_INSET) : insets.bottom
+  return <View style={[styles.inputArea, { paddingBottom: bottomInset + 12 }]}>{children}</View>
 }
 
 const styles = StyleSheet.create({
@@ -578,7 +617,7 @@ const styles = StyleSheet.create({
   messageImage: { width: 120, height: 120, borderRadius: 8, backgroundColor: '#111' },
   emptyState: { paddingVertical: 40, alignItems: 'center' },
   emptyText: { color: '#666', fontSize: 14 },
-  // `paddingBottom` is set inline (`insets.bottom + 12`) — see the input area.
+  // `paddingBottom` is set inline by `ChatInputArea` (modal safe-area inset + 12).
   inputArea: { paddingHorizontal: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#222' },
   nicknameInput: { backgroundColor: '#222', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, color: '#fff', fontSize: 14, marginBottom: 8 },
   inputError: { borderWidth: 1, borderColor: '#ff4444' },
