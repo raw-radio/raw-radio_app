@@ -30,9 +30,11 @@ import { useAudioPlayer } from '../src/hooks/useAudioPlayer'
 import { useStreamStatus } from '../src/hooks/useStreamStatus'
 import { useSubstations } from '../src/hooks/useSubstations'
 import { useChat } from '../src/hooks/useChat'
+import { useClientContent } from '../src/hooks/useClientContent'
 import { useWakeLock } from '../src/hooks/useWakeLock'
 import { useReducedMotion } from '../src/hooks/useReducedMotion'
 import { Player } from '../src/components/Player'
+import { ClientCtaBanner } from '../src/components/ClientCtaBanner'
 import { VolumeSlider } from '../src/components/VolumeSlider'
 import { SubstationSelector } from '../src/components/SubstationSelector'
 import { TrackSearchModal } from '../src/components/TrackSearchModal'
@@ -67,6 +69,7 @@ export default function HomeScreen() {
     showLiveLabel,
     liveLabelText,
   } = useChat(currentSlug)
+  const { promos } = useClientContent()
   const {
     toggle,
     state,
@@ -81,6 +84,9 @@ export default function HomeScreen() {
     stopTrack,
     setNowPlaying,
   } = useAudioPlayer(currentSlug)
+
+  /** First active promo drives the CTA banner above the player (may be absent). */
+  const promo = promos[0]
 
   const [searchOpen, setSearchOpen] = useState(false)
   const [chatVisible, setChatVisible] = useState(false)
@@ -335,6 +341,18 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
       </View>
+
+      {/*
+        CMS promo CTA (a live `client-content:update` can add/remove it). Shown
+        above the hero; `ClientCtaBanner` already applies its own 16px horizontal
+        inset, so it is NOT wrapped in extra padding here.
+      */}
+      {promo?.buttonEnabled && !!promo.buttonLabel.trim() && (
+        <ClientCtaBanner
+          label={promo.buttonLabel}
+          onPress={() => router.push('/' + promo.routePrefix + '/' + promo.slug)}
+        />
+      )}
 
       {/* Player sits above the station list, like the web player */}
       <Player
