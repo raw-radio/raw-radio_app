@@ -21,11 +21,8 @@ import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { ANDROID_APP_DOWNLOAD_URL } from '../src/constants/androidAppDownload'
-import {
-  checkForUpdate,
-  cleanupUpdateArtifacts,
-  downloadAndInstall,
-} from '../src/services/appUpdate'
+import { cleanupUpdateArtifacts, downloadAndInstall } from '../src/services/appUpdate'
+import { useAppUpdateCheck } from '../src/hooks/useAppUpdateCheck'
 import { useAudioPlayer } from '../src/hooks/useAudioPlayer'
 import { useStreamStatus } from '../src/hooks/useStreamStatus'
 import { useSubstations } from '../src/hooks/useSubstations'
@@ -42,7 +39,7 @@ import { PlayerBar } from '../src/components/PlayerBar'
 import { ChatSheet } from '../src/components/ChatSheet'
 import { ShareButton } from '../src/components/ShareButton'
 import { APP_SURFACE_BG } from '../src/utils/layout'
-import type { AppUpdateInfo, OnDemandTrack } from '../src/types'
+import type { OnDemandTrack } from '../src/types'
 
 /** Connection dot colors, mirrored from `.connection-dot--*` in player.scss. */
 const DOT_CONNECTED = '#2bc96d'
@@ -90,8 +87,13 @@ export default function HomeScreen() {
 
   const [searchOpen, setSearchOpen] = useState(false)
   const [chatVisible, setChatVisible] = useState(false)
-  /** Non-null only on Android when GitHub Releases has a newer build. */
-  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null)
+  /**
+   * Non-null only on Android when GitHub Releases has a newer build. The hook
+   * checks on mount and re-checks when the app returns to the foreground (with
+   * a throttle — see `useAppUpdateCheck`), so a release published while the app
+   * stays open still surfaces its button without a restart.
+   */
+  const updateInfo = useAppUpdateCheck()
   const [updateBusy, setUpdateBusy] = useState(false)
 
   const reducedMotion = useReducedMotion()
@@ -114,37 +116,18 @@ export default function HomeScreen() {
     setNowPlaying({ title: status.trackTitle, artist: status.trackArtist })
   }, [status.trackTitle, status.trackArtist, setNowPlaying])
 
-  // Sideloaded-APK update check — Android only, exactly once on mount.
+  // Sideloaded-APK cache sweep — Android only, once on mount. The update check
+  // itself lives in `useAppUpdateCheck`, which re-runs on foreground returns.
   //
-  // `checkForUpdate` resolves to `null` for every failure mode (offline, 403
-  // rate limit, malformed payload, no newer tag) and is a no-op on web, so a
-  // failed check can only ever mean "no affordance", never an error surface.
-  // Deliberately not re-checked: we do not want to poll the GitHub API, and a
-  // stale "update available" link is harmless (the installer still validates
-  // the package).
+  // We only drop update APKs left behind by a previous session, and only
+  // artifacts older than a few minutes — this is a MOUNT effect, not process
+  // start, so a remount while the system installer is still reading a freshly
+  // downloaded APK must not delete it (that install would fail with "there was
+  // a problem parsing the package"). The default age gate in
+  // `cleanupUpdateArtifacts` enforces the delay.
   useEffect(() => {
     if (Platform.OS !== 'android') return
-
-    // Cache sweep: drop update APKs left behind by a previous session. Only
-    // artifacts older than a few minutes are touched — this is a MOUNT effect,
-    // not process start, so a remount while the system installer is still
-    // reading a freshly downloaded APK must not delete it (that install would
-    // fail with "there was a problem parsing the package"). The default age gate
-    // in `cleanupUpdateArtifacts` enforces the delay.
     cleanupUpdateArtifacts()
-
-    let cancelled = false
-    void checkForUpdate()
-      .then((info) => {
-        if (!cancelled) setUpdateInfo(info)
-      })
-      .catch(() => {
-        // Defensive: the service is implemented to never reject.
-      })
-
-    return () => {
-      cancelled = true
-    }
   }, [])
 
   const isPlaying =

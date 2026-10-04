@@ -169,8 +169,10 @@ async function fetchLatestRelease(): Promise<GitHubRelease | null> {
  * Resolves the update for this install, or `null` when there is nothing newer
  * (or the check could not be completed). Never rejects.
  *
- * Call once on mount — the unauthenticated GitHub API allows 60 requests/hour
- * per IP and a stale "update available" flag is harmless.
+ * Called on mount and again whenever the app returns to the foreground — the
+ * caller (`useAppUpdateCheck`) throttles those calls because the unauthenticated
+ * GitHub API allows 60 requests/hour per IP, and a stale "update available" flag
+ * is harmless.
  */
 export async function checkForUpdate(): Promise<AppUpdateInfo | null> {
   if (Platform.OS !== 'android') return null
