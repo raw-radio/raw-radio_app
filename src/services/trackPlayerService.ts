@@ -1,5 +1,72 @@
 import TrackPlayer, { Event } from 'react-native-track-player'
 import { switchStation } from './stationSwitcher'
+import { getArtworkUri } from '../utils/artwork'
+
+// Fallback label so the notification / lock-screen card is never blank while
+// the new station's now-playing metadata is still loading over the WebSocket.
+const FALLBACK_TITLE = 'RAW Radio'
+
+/**
+ * On-demand tracks stream from the API at `${API_BASE}/api/v1/tracks/{id}/stream`
+ * (`getTrackStreamUrl`); live stations stream at `.../{slug}.mp3`
+ * (`stationSwitcher.buildStreamUrl`). The two have opposite resume semantics, so
+ * the headless service — which has no React state to consult — tells them apart
+ * by URL. Matching the path keeps this correct for both the relative
+ * (`EXPO_PUBLIC_API_URL` empty) and absolute deployments.
+ */
+function isOnDemandTrackUrl(url: string | undefined | null): boolean {
+  return !!url && /\/api\/v1\/tracks\/[^/]+\/stream/.test(url)
+}
+
+/**
+ * Resumes the current queue item with the semantics its type requires.
+ *
+ * Live radio: a plain `TrackPlayer.play()` resumes from ExoPlayer's buffered
+ * position, which after a pause sits behind the live edge — audio then drifts
+ * away from the now-playing metadata (delivered live over the WebSocket). That
+ * desync is exactly what this fixes. Rebuild the single-item queue
+ * (`reset()` → `add()` → `play()`) so the decoder reconnects at the live edge;
+ * the 1–3s gap on resume is the accepted trade-off. `reset()` is awaited before
+ * `add()` so the old item's buffer is dropped first.
+ *
+ * On-demand tracks: keep normal resume — continue from the stored position.
+ *
+ * Best-effort by design: never throws, so a failed resume can never take the
+ * playback service down.
+ */
+async function resumeFromLiveEdge(): Promise<void> {
+  let active: Awaited<ReturnType<typeof TrackPlayer.getActiveTrack>>
+  try {
+    active = await TrackPlayer.getActiveTrack()
+  } catch {
+    active = undefined
+  }
+
+  const url = active?.url
+  if (url && !isOnDemandTrackUrl(url)) {
+    try {
+      await TrackPlayer.reset()
+      await TrackPlayer.add({
+        id: url,
+        url,
+        title: active?.title || FALLBACK_TITLE,
+        artist: active?.artist || FALLBACK_TITLE,
+        artwork: getArtworkUri(),
+      })
+      await TrackPlayer.play()
+      return
+    } catch {
+      // Rebuild failed — fall through to the plain resume below as a last
+      // resort (e.g. no network for the fresh connection).
+    }
+  }
+
+  try {
+    await TrackPlayer.play()
+  } catch {
+    // Best-effort — an empty/failed queue must not crash the service.
+  }
+}
 
 /**
  * Headless playback service: reacts to the OS media controls (notification /
@@ -19,7 +86,8 @@ export async function playbackService() {
   })
 
   TrackPlayer.addEventListener(Event.RemotePlay, () => {
-    void TrackPlayer.play().catch(() => {})
+    // Live-edge reload for radio; a normal resume for an on-demand track.
+    void resumeFromLiveEdge()
   })
 
   TrackPlayer.addEventListener(Event.RemoteStop, () => {
@@ -42,7 +110,10 @@ export async function playbackService() {
       } else if (event.permanent) {
         await TrackPlayer.stop()
       } else {
-        await TrackPlayer.play()
+        // End of a transient duck / interruption: same live-edge semantics as a
+        // notification resume — radio must rejoin the live edge, a track resumes
+        // from its position.
+        await resumeFromLiveEdge()
       }
     } catch {
       // Best-effort — a failed duck transition must not take the service down.

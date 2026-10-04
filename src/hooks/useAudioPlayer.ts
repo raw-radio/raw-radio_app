@@ -147,6 +147,11 @@ export function useAudioPlayer(currentSlug: string | undefined) {
   // Latest `playTrack`, so `play()` can restart the current on-demand track
   // (declared later in this hook, but reachable through the ref).
   const playTrackRef = useRef<(track: OnDemandTrack) => Promise<void>>(async () => {})
+  // Latest `tryPlay`, reached by the AppState resume handler (registered once
+  // with `[]` deps, so it must not capture a stale closure). Used to force a
+  // destructive live-edge reload when the OS paused a radio stream in the
+  // background.
+  const tryPlayRef = useRef<(url: string, reason: TryPlayReason) => Promise<void>>(async () => {})
   // Monotonic id of the newest load request (radio or on-demand track). Every
   // await below re-checks it, because RNTP owns a single queue: an older request
   // that resumes after a newer one must not reset/add/play on top of it.
@@ -361,10 +366,16 @@ export function useAudioPlayer(currentSlug: string | undefined) {
             // at a different URL, so playing this stale queue would fight the
             // in-flight load.
             if (!isPlayingRef.current || currentUrlRef.current !== urlAtResume) return
-            // OS-induced pause on an intent-to-play session: the baseline was
-            // just rebased above, so only restart the transport. Playing /
-            // Buffering / Loading must not be touched — they are already fine.
-            return TrackPlayer.play()
+            // On-demand tracks keep normal resume semantics: continue from the
+            // stored position. Playing / Buffering / Loading are not touched.
+            if (modeRef.current === 'track') return TrackPlayer.play()
+            // OS-induced pause on an intent-to-play radio session: a plain
+            // `TrackPlayer.play()` would resume from ExoPlayer's buffered
+            // position and drift behind the live edge (see `tryPlay`). Force a
+            // destructive reset/add/play via `tryPlay(url, 'reconnect')` — the
+            // `'reconnect'` reason is permanently excluded from the fast path,
+            // so it always rebuilds the stream and re-arms all load guards.
+            return void tryPlayRef.current(urlAtResume, 'reconnect')
           }
         })
         .catch(() => {})
@@ -655,10 +666,43 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     }
   }, [])
 
+  // Re-publish the tray metadata whenever the active track changes.
+  //
+  // Any destructive queue rebuild drops the `updateNowPlayingMetadata` override
+  // and resets the tray to the newly added item's fallback title. That happens
+  // for our own `tryPlay` reset/add AND — the case this listener exists for —
+  // for the headless playback service's live-edge reload on a notification /
+  // duck resume (`src/services/trackPlayerService.ts`), which the hook's
+  // RemotePlay branch does not perform itself. Without clearing the dedup cache
+  // the notification would stay stuck on "RAW Radio" after such a resume until
+  // the next track change. On-demand mode owns its own tray metadata, hence the
+  // mode guard.
+  useEffect(() => {
+    const subscription = TrackPlayer.addEventListener(Event.PlaybackActiveTrackChanged, () => {
+      if (modeRef.current === 'track') return
+      publishedNowPlayingRef.current = null
+      void publishNowPlaying()
+    })
+    return () => subscription.remove()
+  }, [publishNowPlaying])
+
   const tryPlay = useCallback(
     async (url: string, reason: TryPlayReason) => {
       // Invalidate any in-flight request: this one is now the newest.
       const requestId = ++playRequestRef.current
+      // Publish the newest requested URL SYNCHRONOUSLY, before the first await.
+      //
+      // `currentUrlRef` doubles as "what this instance is targeting right now",
+      // and the AppState resume handler captures it at its entry and later
+      // bails out when it changed (`currentUrlRef !== urlAtResume`). Without
+      // this synchronous flip, a slug-change that starts loading a new station
+      // would not touch the ref until after `await setupPromiseRef`, so a
+      // resume continuation racing that switch would still see the OLD url,
+      // fail its guard, win `playRequestRef` and reload the previous station
+      // under the new UI. `previousUrl` preserves the old value for the
+      // "already loaded?" fast-path gate below.
+      const previousUrl = currentUrlRef.current
+      currentUrlRef.current = url
       // Playing intent: a kill must not stop the stream (see
       // `applyAppKilledBehavior`). Covers `play()`, `stopTrack()`, the retry
       // timer and the slug-change effect, which all funnel through here.
@@ -669,11 +713,12 @@ export function useAudioPlayer(currentSlug: string | undefined) {
         if (requestId !== playRequestRef.current) return
 
         // Fast path: if the stream this call asks for is ALREADY loaded and
-        // healthy, reset/add/play would only destroy and rebuild the native
-        // decoder (audible gap + loading flash) for no gain. This is what a
-        // resumed / already-playing stream hits. The probe is only attempted
-        // when it can possibly apply, and any probe failure falls through to the
-        // destructive load below (the safe default).
+        // ACTIVELY playing/buffering, reset/add/play would only destroy and
+        // rebuild the native decoder (audible gap + loading flash) for no gain.
+        // A Paused stream deliberately does NOT qualify (see below): a live radio
+        // resume must rebuild at the live edge instead of replaying the buffer.
+        // The probe is only attempted when it can possibly apply, and any probe
+        // failure falls through to the destructive load below (the safe default).
         //
         // The automatic retry (`reason === 'reconnect'`) is deliberately EXCLUDED:
         // it is only armed after an explicit failure (error state / stall
@@ -681,7 +726,13 @@ export function useAudioPlayer(currentSlug: string | undefined) {
         // dead-but-open stream that RNTP still reports as Playing would
         // otherwise be fast-pathed forever and never rebuilt — breaking the
         // stall recovery this hook guarantees.
-        if (reason !== 'reconnect' && currentUrlRef.current === url && hasQueueRef.current) {
+        //
+        // `previousUrl` (captured before the synchronous ref flip above), not
+        // the now-always-equal `currentUrlRef.current`, is what keeps this gate
+        // meaningful: it asks "was THIS url already the loaded one before this
+        // call?". The native `activeUrl === url` probe below re-verifies it
+        // against the player anyway.
+        if (reason !== 'reconnect' && previousUrl === url && hasQueueRef.current) {
           let nativeState: TrackPlayerState | undefined
           let activeUrl: string | undefined
           try {
@@ -696,11 +747,19 @@ export function useAudioPlayer(currentSlug: string | undefined) {
           }
           if (requestId !== playRequestRef.current) return
 
+          // Paused is deliberately NOT "healthy" for a live radio stream.
+          // `TrackPlayer.play()` (the old Paused fast path) resumes from
+          // ExoPlayer's buffered position, which after a pause of any length
+          // sits behind the live edge — so audio would drift away from the
+          // now-playing metadata (delivered live over the WebSocket). Falling
+          // through to the destructive reset/add/play below forces a fresh
+          // connection at the live edge; the 1–3s audible gap on resume is the
+          // accepted trade-off. Only an already-Playing/Buffering stream is
+          // fast-pathed — there is nothing to resume there.
           const isLoadedAndHealthy =
             activeUrl === url &&
             (nativeState === TrackPlayerState.Playing ||
-              nativeState === TrackPlayerState.Buffering ||
-              nativeState === TrackPlayerState.Paused)
+              nativeState === TrackPlayerState.Buffering)
 
           if (isLoadedAndHealthy) {
             // Re-assert the play intent without touching the queue. The queue /
@@ -709,26 +768,18 @@ export function useAudioPlayer(currentSlug: string | undefined) {
             currentUrlRef.current = url
             isPlayingRef.current = true
             playbackStateRef.current = nativeState
-
-            if (nativeState === TrackPlayerState.Paused) {
-              // Only the transport action was missing; resume the loaded
-              // stream. This is a genuine fresh playback segment, so it gets a
-              // full stall budget and its own progress evidence.
-              lastProgressAtRef.current = Date.now()
-              progressSeenRef.current = false
-              await TrackPlayer.play()
-              if (requestId !== playRequestRef.current) return
-              setState('playing')
-            } else {
-              // Already playing/buffering: leave the watchdog baseline and
-              // `progressSeenRef` untouched so a genuinely frozen stream stays
-              // detectable (the watchdog recovers it via a destructive retry).
-              setState(nativeState === TrackPlayerState.Buffering ? 'buffering' : 'playing')
-            }
+            // Already playing/buffering: leave the watchdog baseline and
+            // `progressSeenRef` untouched so a genuinely frozen stream stays
+            // detectable (the watchdog recovers it via a destructive retry).
+            setState(nativeState === TrackPlayerState.Buffering ? 'buffering' : 'playing')
             return
           }
         }
 
+        // Re-assert the target after `await setupPromiseRef`: the init chain's
+        // mount seed can write `currentUrlRef` while setup resolves, so this is
+        // the authoritative post-setup write (idempotent otherwise). The
+        // synchronous flip at the top still stands as the early race guard.
         currentUrlRef.current = url
         isPlayingRef.current = true
         // A fresh attempt gets a full stall budget and its own progress evidence.
@@ -763,6 +814,11 @@ export function useAudioPlayer(currentSlug: string | undefined) {
     },
     [publishNowPlaying, applyAppKilledBehavior],
   )
+
+  // Publish the current `tryPlay` to the AppState resume handler, which is
+  // registered once with `[]` deps and must reach the latest closure through a
+  // ref (same pattern as `playTrackRef`).
+  tryPlayRef.current = tryPlay
 
   const play = useCallback(async () => {
     retryCountRef.current = 0
