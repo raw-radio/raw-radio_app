@@ -3,6 +3,7 @@ import { StatusBar } from 'expo-status-bar'
 import { useCallback, useEffect, useState } from 'react'
 import { LayoutChangeEvent, StyleSheet, View } from 'react-native'
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
+import { KeyboardProvider } from 'react-native-keyboard-controller'
 import { ErrorBoundary } from '../src/components/ErrorBoundary'
 import {
   APP_SURFACE_BG,
@@ -75,7 +76,7 @@ export default function RootLayout() {
     return unsubscribe
   }, [router])
 
-  return (
+  const app = (
     <SafeAreaProvider>
       {/*
         `viewport` is the full-bleed shell. On the framed desktop layout it
@@ -121,6 +122,14 @@ export default function RootLayout() {
       </View>
     </SafeAreaProvider>
   )
+
+  // `KeyboardProvider` must be at the root: it tracks keyboard movement natively
+  // (incl. the IME insets edge-to-edge delivers to the focused window) and is
+  // what lets `KeyboardAvoidingView` work inside `Modal` dialogs — where RN's
+  // own `Keyboard` events never fire. This app is edge-to-edge on Android
+  // (`gradle.properties: edgeToEdgeEnabled=true`), so the provider auto-detects
+  // it and the translucent flags must NOT be passed.
+  return <KeyboardProvider>{app}</KeyboardProvider>
 }
 
 const styles = StyleSheet.create({

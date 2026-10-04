@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback, useContext } from 'react'
 import {
   View, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, Pressable, FlatList, Modal, Image,
-  ScrollView, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, useWindowDimensions,
+  ScrollView, StyleSheet, Platform, ActivityIndicator, useWindowDimensions,
 } from 'react-native'
+import { KeyboardAvoidingView, useKeyboardState } from 'react-native-keyboard-controller'
 import Animated, {
   Easing as ReanimatedEasing,
   interpolate,
@@ -150,11 +151,23 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
   // column even though it should visually belong to it — hence the explicit
   // reference to the column's measured height.
   const columnHeight = useContext(ColumnHeightContext)
+  // Keyboard metrics from `react-native-keyboard-controller`. RN's own
+  // `Keyboard` events are emitted from the *activity* window's root view; while
+  // this `Modal` dialog owns focus they never fire, so the stock
+  // `KeyboardAvoidingView` silently did nothing here. The library tracks the
+  // keyboard natively and reports it even inside a Modal (incl. edge-to-edge).
+  // On web its events are no-ops, so `isVisible` stays false and the layout is
+  // untouched (the browser already keeps the field above the keyboard).
+  const keyboard = useKeyboardState()
+  const keyboardHeight = keyboard.isVisible ? keyboard.height : 0
   // Bound the sheet by 80% of the viewport (web drawer parity), the rendered
   // column height (so a shorter column always wins), and a 600px desktop cap so
   // it stays phone-sized on a large monitor instead of covering most of it.
+  // When the keyboard is open the available band shrinks by its height, so the
+  // sheet (lifted by the keyboard-avoiding padding) never pokes past the top.
   const sheetMaxHeight = Math.min(
     windowHeight * SHEET_MAX_HEIGHT_RATIO,
+    windowHeight - keyboardHeight,
     columnHeight ?? windowHeight,
     framed ? SHEET_DESKTOP_MAX_HEIGHT : Number.POSITIVE_INFINITY,
   )
@@ -404,7 +417,11 @@ export function ChatSheet({ isOpen, onClose, substationSlug, messages }: ChatShe
           />
 
           <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            // `padding` lifts the bottom-anchored drawer by the keyboard height
+            // on both platforms. The stock Android `height` behavior shrinks the
+            // container, but because the sheet is bottom-aligned that left it
+            // under the keyboard anyway (and it never saw the events in a Modal).
+            behavior="padding"
             style={[
               framed ? styles.drawerContainerFramed : styles.drawerContainerFull,
               // RN Web portals `Modal` to `document.body`, i.e. outside the
