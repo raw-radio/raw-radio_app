@@ -1,8 +1,8 @@
 import { Stack, useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import { useCallback, useEffect, useState } from 'react'
-import { LayoutChangeEvent, StyleSheet, View } from 'react-native'
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
+import { LayoutChangeEvent, Platform, StyleSheet, View } from 'react-native'
+import { type Edge, SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 import { KeyboardProvider } from 'react-native-keyboard-controller'
 import { ErrorBoundary } from '../src/components/ErrorBoundary'
 import {
@@ -42,6 +42,22 @@ import { initOneSignal } from '../src/services/oneSignal'
 function isSafeInternalUrl(url: string | null): url is string {
   return !!url && /^\/(?!\/)/.test(url)
 }
+
+/**
+ * Safe-area edges applied by the root shell.
+ *
+ * Native keeps the bottom inset: on Android it lifts the app above the
+ * navigation bar / gesture pill, on iOS above the home indicator — without it
+ * the last row (APK link / player bar / chat input trigger) sits under them.
+ *
+ * Web drops `bottom`. `react-native-safe-area-context` derives its insets from
+ * `env(safe-area-inset-*)`, which resolves on mobile browsers, but the browser
+ * already reserves that space in its own chrome — applying it again leaves a
+ * dead gap below the player. Top / left / right stay: they still cover the
+ * notch in landscape and the iOS top bar.
+ */
+const SAFE_AREA_EDGES: Edge[] =
+  Platform.OS === 'web' ? ['top', 'left', 'right'] : ['top', 'right', 'bottom', 'left']
 
 export default function RootLayout() {
   const router = useRouter()
@@ -85,6 +101,7 @@ export default function RootLayout() {
       */}
       <View style={[styles.viewport, framed && styles.viewportFramed]}>
         <SafeAreaView
+          edges={SAFE_AREA_EDGES}
           style={[
             styles.column,
             // `flex: 1` in BOTH modes. The framed card must still resolve to a
