@@ -1,7 +1,7 @@
 import { Stack, useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import { useCallback, useEffect, useState } from 'react'
-import { LayoutChangeEvent, Platform, StyleSheet, View } from 'react-native'
+import { LayoutChangeEvent, Linking, Platform, StyleSheet, View } from 'react-native'
 import { type Edge, SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 import { KeyboardProvider } from 'react-native-keyboard-controller'
 import { ErrorBoundary } from '../src/components/ErrorBoundary'
@@ -90,6 +90,30 @@ export default function RootLayout() {
     })
 
     return unsubscribe
+  }, [router])
+
+  /**
+   * Safety net for native intents that reach the running activity via
+   * `onNewIntent` while React is already mounted. `+native-intent` rewrites the
+   * react-native-track-player media-notification sentinel
+   * (`trackplayer://notification.click`, MusicService.kt:104) to `/` before the
+   * router matches it; this listener additionally catches the raw event and
+   * replaces to home, so a notification tap can never fall through to
+   * `+not-found` even if the native-intent rewrite is bypassed.
+   */
+  useEffect(() => {
+    if (Platform.OS === 'web') return
+
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      if (!url.startsWith('trackplayer://')) return
+      try {
+        router.replace('/')
+      } catch {
+        // Router not mounted yet — the initial-URL path handles it.
+      }
+    })
+
+    return () => subscription.remove()
   }, [router])
 
   const app = (

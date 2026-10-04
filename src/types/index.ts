@@ -34,6 +34,16 @@ export interface OnDemandTrack {
   duration: number | null
 }
 
+/** A streamable radio station (substation) shown in the station grid. */
+export interface SubstationInfo {
+  id: string
+  name: string
+  icon: string
+  slug: string
+  color: string
+  isActive: boolean
+}
+
 /**
  * Now-playing metadata consumed by the OS media session.
  * On web it feeds the Media Session API; on native it is pushed to the Android

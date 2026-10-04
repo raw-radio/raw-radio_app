@@ -3,6 +3,7 @@
     "name": "RAW Radio",
     "slug": "raw-radio",
     "version": "0.1.0",
+    "scheme": "rawradio",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "icon": "./assets/icon.png",

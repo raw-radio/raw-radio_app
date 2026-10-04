@@ -22,5 +22,6 @@ export const STORAGE_KEYS = {
   VOLUME: 'raw-radio-volume',
   MUTED: 'raw-radio-muted',
   SUBSTATION: 'raw-radio-substation',
+  SUBSTATIONS: 'raw-radio-substations',
   CHAT_NICKNAME: 'chatNickname',
 } as const
