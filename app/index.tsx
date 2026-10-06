@@ -34,12 +34,10 @@ import { Player } from '../src/components/Player'
 import { ClientCtaBanner } from '../src/components/ClientCtaBanner'
 import { VolumeSlider } from '../src/components/VolumeSlider'
 import { SubstationSelector } from '../src/components/SubstationSelector'
-import { TrackSearchModal } from '../src/components/TrackSearchModal'
 import { PlayerBar } from '../src/components/PlayerBar'
 import { ChatSheet } from '../src/components/ChatSheet'
 import { ShareButton } from '../src/components/ShareButton'
 import { APP_SURFACE_BG } from '../src/utils/layout'
-import type { OnDemandTrack } from '../src/types'
 
 /** Connection dot colors, mirrored from `.connection-dot--*` in player.scss. */
 const DOT_CONNECTED = '#2bc96d'
@@ -75,7 +73,6 @@ export default function HomeScreen() {
     mode,
     currentTrack,
     trackProgress,
-    playTrack,
     stopTrack,
     setNowPlaying,
   } = useAudioPlayer(currentSlug)
@@ -83,7 +80,6 @@ export default function HomeScreen() {
   /** First active promo drives the CTA banner above the player (may be absent). */
   const promo = promos[0]
 
-  const [searchOpen, setSearchOpen] = useState(false)
   const [chatVisible, setChatVisible] = useState(false)
   /**
    * Non-null only on Android when GitHub Releases has a newer build. The hook
@@ -193,14 +189,6 @@ export default function HomeScreen() {
     refreshNowPlaying()
   }, [toggle, refreshNowPlaying])
 
-  const handleTrackSelect = useCallback(
-    (track: OnDemandTrack) => {
-      setSearchOpen(false)
-      playTrack(track)
-    },
-    [playTrack],
-  )
-
   /**
    * Opens the Android APK download. Mirrors the `openExternal` pattern from
    * `app/copyright.tsx`: on web go through `window.open` so the download starts
@@ -277,15 +265,6 @@ export default function HomeScreen() {
         </View>
 
         <View style={styles.headerActions}>
-          <TouchableOpacity
-            onPress={() => setSearchOpen(true)}
-            style={styles.headerBtn}
-            activeOpacity={0.85}
-            accessibilityRole="button"
-            accessibilityLabel="Search tracks"
-          >
-            <Ionicons name="search" size={18} color="#b3b3b3" />
-          </TouchableOpacity>
           <ShareButton slug={currentSlug || 'main'} />
           {/* Chat is available only when enabled in the admin settings — mirrors web. */}
           {!chatIsLoading && chatIsOpen && (
@@ -395,11 +374,6 @@ export default function HomeScreen() {
         <PlayerBar track={currentTrack} progress={trackProgress} onStop={stopTrack} />
       )}
 
-      <TrackSearchModal
-        isOpen={searchOpen}
-        onClose={() => setSearchOpen(false)}
-        onTrackSelect={handleTrackSelect}
-      />
       {!chatIsLoading && chatIsOpen && (
         <ChatSheet
           isOpen={chatVisible}
