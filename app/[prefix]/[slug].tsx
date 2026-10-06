@@ -1,12 +1,12 @@
 import React, { useCallback } from 'react'
-import { ActivityIndicator, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
+import Logo from '../../src/assets/logo-wordmark.svg'
 import { PageContent } from '../../src/components/content'
 import { usePromoPage } from '../../src/hooks/useClientContent'
 import { APP_SURFACE_BG } from '../../src/utils/layout'
 
-const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' })
 const ACCENT = '#ff6b35'
 
 /**
@@ -98,10 +98,7 @@ function StatusScreen({ title, message }: { title: string; message: string }) {
         >
           <Ionicons name="arrow-back" size={22} color="#b3b3b3" />
         </TouchableOpacity>
-        <Text style={styles.logo} allowFontScaling={false}>
-          RAW
-          <Text style={styles.logoAccent}>RADIO</Text>
-        </Text>
+        <Logo width={130} height={28} accessibilityLabel="RAW Radio" />
       </View>
 
       <View style={styles.centered}>
@@ -140,14 +137,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  logo: {
-    color: '#fff',
-    fontFamily: MONO_FONT,
-    fontWeight: '700',
-    fontSize: 15,
-    letterSpacing: -0.3,
-  },
-  logoAccent: { color: ACCENT },
   centered: {
     flex: 1,
     alignItems: 'center',

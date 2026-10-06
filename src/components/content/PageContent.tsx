@@ -2,9 +2,10 @@ import React, { useCallback } from 'react'
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
 import { Stack, useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
+import Logo from '../../assets/logo-wordmark.svg'
 import { APP_SURFACE_BG } from '../../utils/layout'
 import { BlockRenderer } from './BlockRenderer'
-import { CONTENT, CONTENT_MAX_WIDTH, CONTENT_PADDING, MONO_FONT } from './theme'
+import { CONTENT, CONTENT_MAX_WIDTH, CONTENT_PADDING } from './theme'
 import type { PromoBlock } from './types'
 
 interface PageContentProps {
@@ -46,10 +47,7 @@ export function PageContent({ blocks, title, screenTitle }: PageContentProps) {
         >
           <Ionicons name="arrow-back" size={22} color={CONTENT.text} />
         </TouchableOpacity>
-        <Text style={styles.logo} allowFontScaling={false}>
-          RAW
-          <Text style={styles.logoAccent}>RADIO</Text>
-        </Text>
+        <Logo width={130} height={28} accessibilityLabel="RAW Radio" />
       </View>
 
       <ScrollView
@@ -85,14 +83,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  logo: {
-    color: CONTENT.heading,
-    fontFamily: MONO_FONT,
-    fontWeight: '700',
-    fontSize: 15,
-    letterSpacing: -0.3,
-  },
-  logoAccent: { color: CONTENT.accent },
   scroll: { flex: 1 },
   content: {
     width: '100%',

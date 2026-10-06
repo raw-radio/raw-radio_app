@@ -10,6 +10,7 @@ import {
 } from 'react-native'
 import { Stack, useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
+import Logo from '../src/assets/logo-wordmark.svg'
 import { APP_SURFACE_BG, APP_SURFACE_BG_RAISED } from '../src/utils/layout'
 
 /**
@@ -27,8 +28,6 @@ const COPYRIGHT_EMAIL_URL = `mailto:${COPYRIGHT_EMAIL}`
 /** «Ст. 1253.1 ГК РФ — Ответственность информационного посредника». */
 const LAW_URL =
   'https://www.consultant.ru/document/cons_doc_LAW_64629/eb6ec591cb78fe25054cd4b9e0dbcc79abcf0d3a/'
-
-const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' })
 
 export default function CopyrightScreen() {
   const router = useRouter()
@@ -77,10 +76,7 @@ export default function CopyrightScreen() {
         >
           <Ionicons name="arrow-back" size={22} color="#b3b3b3" />
         </TouchableOpacity>
-        <Text style={styles.logo} allowFontScaling={false}>
-          RAW
-          <Text style={styles.logoAccent}>RADIO</Text>
-        </Text>
+        <Logo width={130} height={28} accessibilityLabel="RAW Radio" />
       </View>
 
       <ScrollView
@@ -162,14 +158,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  logo: {
-    color: '#fff',
-    fontFamily: MONO_FONT,
-    fontWeight: '700',
-    fontSize: 15,
-    letterSpacing: -0.3,
-  },
-  logoAccent: { color: '#ff6b35' },
   scroll: { flex: 1 },
   // Mirrors the 560px `.container` of the static page.
   content: {

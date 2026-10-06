@@ -18,8 +18,8 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { Ionicons } from '@expo/vector-icons'
-import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
+import Logo from '../src/assets/logo-wordmark.svg'
 import { ANDROID_APP_DOWNLOAD_URL } from '../src/constants/androidAppDownload'
 import { cleanupUpdateArtifacts, downloadAndInstall } from '../src/services/appUpdate'
 import { useAppUpdateCheck } from '../src/hooks/useAppUpdateCheck'
@@ -52,8 +52,6 @@ const DOT_DISCONNECTED = '#d64838'
  */
 const DOT_PULSE_HALF_MS = 2000
 const DOT_PULSE_MIN_OPACITY = 0.2
-
-const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' })
 
 export default function HomeScreen() {
   const router = useRouter()
@@ -260,20 +258,9 @@ export default function HomeScreen() {
       {/* Header: logo + connection dot on the left, actions on the right */}
       <View style={styles.header}>
         <View style={styles.headerLogo}>
-          <LinearGradient
-            colors={['#ff6b35', '#ff4500']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.logoIcon}
-          >
-            <Text style={styles.logoIconText} allowFontScaling={false}>
-              R
-            </Text>
-          </LinearGradient>
-          <Text style={styles.logoText} allowFontScaling={false}>
-            RAW
-            <Text style={styles.logoTextAccent}>RADIO</Text>
-          </Text>
+          <View style={styles.logoWrap}>
+            <Logo width="100%" height="100%" accessibilityLabel="RAW Radio" />
+          </View>
           <Animated.View
             accessible
             accessibilityLabel={connectionLabel}
@@ -438,28 +425,21 @@ const styles = StyleSheet.create({
     paddingBottom: 4,
     marginBottom: 24,
   },
-  headerLogo: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  logoIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
+  // Shrinks (not clips) when the header runs out of room on narrow screens.
+  // `minWidth: 0` lifts the default flex min-content floor; `headerActions`
+  // below is `flexShrink: 0`, so all the give comes from the logo block.
+  headerLogo: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1, minWidth: 0 },
+  // Base size 139×30 from the 288×62 wordmark. `width` is the flex basis,
+  // `flexShrink: 1` lets it compress, `aspectRatio` keeps the height in step.
+  // `maxWidth` caps it at the design size on wide screens. The SVG fills this
+  // box (`width/height="100%"`) and scales via its own `viewBox`.
+  logoWrap: {
+    width: 139,
+    maxWidth: 139,
+    aspectRatio: 288 / 62,
+    flexShrink: 1,
+    minWidth: 0,
   },
-  logoIconText: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '700',
-    lineHeight: 24,
-  },
-  logoText: {
-    color: '#fff',
-    fontFamily: MONO_FONT,
-    fontWeight: '700',
-    fontSize: 15,
-    letterSpacing: -0.3,
-  },
-  logoTextAccent: { color: '#ff6b35' },
   connectionDot: {
     width: 8,
     height: 8,
@@ -470,7 +450,8 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     borderWidth: 1,
   },
-  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  // Never compress the action buttons — the logo absorbs the shrink instead.
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 12, flexShrink: 0 },
   headerBtn: {
     width: 40,
     height: 40,
