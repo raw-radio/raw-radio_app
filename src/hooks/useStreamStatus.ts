@@ -49,7 +49,12 @@ export function useStreamStatus(activeSlug?: string) {
   const fetchSeqRef = useRef(0)
 
   const handleTrackChange = useCallback(
-    (data: { substationId?: string; substationSlug?: string; trackTitle?: string | null; trackArtist?: string | null }) => {
+    (data: {
+      substationId?: string
+      substationSlug?: string
+      trackTitle?: string | null
+      trackArtist?: string | null
+    }) => {
       if (!isForActiveSubstation(data, activeSlugRef.current)) return
       setStatus((prev) => ({
         ...prev,
@@ -61,7 +66,15 @@ export function useStreamStatus(activeSlug?: string) {
   )
 
   const handleNowPlaying = useCallback(
-    (data: { substationId?: string; substationSlug?: string; trackTitle?: string | null; trackArtist?: string | null; source?: string; djName?: string | null; duration?: number | null }) => {
+    (data: {
+      substationId?: string
+      substationSlug?: string
+      trackTitle?: string | null
+      trackArtist?: string | null
+      source?: string
+      djName?: string | null
+      duration?: number | null
+    }) => {
       if (!isForActiveSubstation(data, activeSlugRef.current)) return
       setStatus((prev) => ({
         ...prev,
@@ -88,17 +101,20 @@ export function useStreamStatus(activeSlug?: string) {
     [],
   )
 
-  const handleAdminStats = useCallback((data: { listeners: number | Record<string, number>; count?: number }) => {
-    let count = 0
-    if (typeof data.listeners === 'object' && data.listeners !== null) {
-      count = data.listeners['main'] ?? 0
-    } else if (typeof data.listeners === 'number') {
-      count = data.listeners
-    } else if (typeof data.count === 'number') {
-      count = data.count
-    }
-    setStatus((prev) => (prev.listeners === count ? prev : { ...prev, listeners: count }))
-  }, [])
+  const handleAdminStats = useCallback(
+    (data: { listeners: number | Record<string, number>; count?: number }) => {
+      let count = 0
+      if (typeof data.listeners === 'object' && data.listeners !== null) {
+        count = data.listeners['main'] ?? 0
+      } else if (typeof data.listeners === 'number') {
+        count = data.listeners
+      } else if (typeof data.count === 'number') {
+        count = data.count
+      }
+      setStatus((prev) => (prev.listeners === count ? prev : { ...prev, listeners: count }))
+    },
+    [],
+  )
 
   useEffect(() => {
     const socket = io(SOCKET_URL, {
@@ -178,15 +194,18 @@ export function useStreamStatus(activeSlug?: string) {
   }, [])
 
   // Fetch-on-mount / fetch-on-station-change: сразу показываем текущий трек станции,
-  // не дожидаясь WS-события. Оптимистичная очистка при смене станции — трек
-  // предыдущей станции не должен висеть до прихода нового.
+  // не дожидаясь WS-события.
+  //
+  // Stale-while-switching: предыдущее название/исполнитель СОЗНАТЕЛЬНО остаются на
+  // экране, пока грузится трек новой станции, — раньше здесь был оптимистичный
+  // сброс в null, из-за которого название мигало и вёрстка прыгала при каждом
+  // переключении. Trade-off: если у новой станции трека реально нет, старое название
+  // висит до явного пустого события/ответа от сервера — принято ради отсутствия мигания.
   useEffect(() => {
     const slug = activeSlug ?? null
     setStatus((prev) => ({
       ...prev,
       substationId: slug ?? prev.substationId,
-      trackTitle: null,
-      trackArtist: null,
     }))
     refreshNowPlaying()
   }, [activeSlug, refreshNowPlaying])

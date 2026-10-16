@@ -23,6 +23,14 @@ import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import type { PlayerState, StreamStatus } from '../types'
 import { useReducedMotion } from '../hooks/useReducedMotion'
+import { MarqueeText } from './MarqueeText'
+
+/**
+ * One line of now-playing type — shared by the title, separator and artist so
+ * the row never jitters between them, and reused as the marquee's fixed height
+ * (the box reserves this height even when there is nothing to show).
+ */
+const TRACK_LINE_HEIGHT = 24
 
 /** Diameter of the play button and of every pulse ring (`.play-btn` / `.pulse-ring`). */
 const PLAY_BUTTON_SIZE = 140
@@ -173,6 +181,13 @@ export function Player({ state, status, onToggle, isLive = false, liveLabel }: P
   const trackTitle = status.trackTitle
   const trackArtist = status.trackArtist
   const hasTrack = !!trackTitle
+  const liveText = liveLabel?.trim() || 'Listen live'
+  /** Concise spoken label for the whole now-playing line (title — artist). */
+  const nowPlayingLabel = isLive
+    ? liveText
+    : hasTrack
+      ? [trackTitle, trackArtist].filter(Boolean).join(' — ')
+      : ''
 
   // Press feedback: the play button element scales down on press-in and back up
   // on press-out (mirrors `.play-btn:active`). Transform-only → native driver.
@@ -239,29 +254,43 @@ export function Player({ state, status, onToggle, isLive = false, liveLabel }: P
         </Pressable>
       </View>
 
-      {isLive ? (
-        <View style={styles.nowPlaying}>
-          <Text style={[styles.trackTitle, styles.trackTitleLive]} numberOfLines={1} ellipsizeMode="tail">
-            {liveLabel?.trim() || 'Listen live'}
-          </Text>
-        </View>
-      ) : (
-        hasTrack && (
-          <View style={styles.nowPlaying}>
-            <Text style={styles.trackTitle} numberOfLines={1} ellipsizeMode="tail">
-              {trackTitle}
-            </Text>
-            {trackArtist && (
+      {/*
+        The now-playing row is ALWAYS mounted at a fixed line height, even with
+        nothing to show, so switching stations never collapses it and shoves the
+        station list / volume slider around. Long lines scroll as a continuous
+        ticker (`MarqueeText`); short lines are centred and static.
+      */}
+      <View style={styles.nowPlaying}>
+        {(isLive || hasTrack) && (
+          <MarqueeText height={TRACK_LINE_HEIGHT} accessibilityLabel={nowPlayingLabel}>
+            {isLive ? (
+              <Text
+                style={[styles.trackTitle, styles.trackTitleLive]}
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {liveText}
+              </Text>
+            ) : (
               <>
-                <Text style={styles.trackSeparator}>—</Text>
-                <Text style={styles.trackArtist} numberOfLines={1} ellipsizeMode="tail">
-                  {trackArtist}
+                <Text style={styles.trackTitle} numberOfLines={1} ellipsizeMode="tail">
+                  {trackTitle}
                 </Text>
+                {trackArtist && (
+                  <>
+                    <Text style={styles.trackSeparator} numberOfLines={1} ellipsizeMode="tail">
+                      —
+                    </Text>
+                    <Text style={styles.trackArtist} numberOfLines={1} ellipsizeMode="tail">
+                      {trackArtist}
+                    </Text>
+                  </>
+                )}
               </>
             )}
-          </View>
-        )
-      )}
+          </MarqueeText>
+        )}
+      </View>
     </View>
   )
 }
@@ -357,28 +386,27 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(13, 13, 13, 0.8)',
   },
   nowPlaying: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'baseline',
-    justifyContent: 'center',
-    // `alignSelf: stretch` + `maxWidth: 100%` bound the row to the viewport, so
-    // the shrinking children below can actually truncate instead of stretching
-    // the row past the screen edge (mirrors `.hero-now-playing`).
+    // Fixed single-line height: reserved whether or not a track is showing, so
+    // the station list / volume slider below never jump when it changes.
+    height: TRACK_LINE_HEIGHT,
+    // `alignSelf: stretch` + `maxWidth: 100%` bound the row to the viewport
+    // (mirrors `.hero-now-playing`). `flexWrap` is gone — the only content is
+    // the ticker, which handles its own single line.
     alignSelf: 'stretch',
     maxWidth: '100%',
     paddingHorizontal: 16,
     // The 60px gap to the play button lives on `.play-btn-wrap` (web parity).
     marginTop: 0,
   },
+  // `flexShrink: 0` on every text run is load-bearing: it keeps each run at its
+  // intrinsic width so the ticker content can overflow (and be measured) instead
+  // of being ellipsised inside the container.
   trackTitle: {
     color: '#fff',
     fontSize: 18,
     fontWeight: '700',
-    lineHeight: 24,
-    textAlign: 'center',
-    maxWidth: '100%',
-    minWidth: 0,
-    flexShrink: 1,
+    lineHeight: TRACK_LINE_HEIGHT,
+    flexShrink: 0,
   },
   trackTitleLive: {
     color: '#ff6b35',
@@ -386,7 +414,7 @@ const styles = StyleSheet.create({
   trackSeparator: {
     color: '#b3b3b3',
     fontSize: 18,
-    lineHeight: 24,
+    lineHeight: TRACK_LINE_HEIGHT,
     marginHorizontal: 5,
     // `.hero-track-separator { flex-shrink: 0 }`
     flexShrink: 0,
@@ -394,10 +422,7 @@ const styles = StyleSheet.create({
   trackArtist: {
     color: '#b3b3b3',
     fontSize: 18,
-    lineHeight: 24,
-    textAlign: 'center',
-    maxWidth: '100%',
-    minWidth: 0,
-    flexShrink: 1,
+    lineHeight: TRACK_LINE_HEIGHT,
+    flexShrink: 0,
   },
 })

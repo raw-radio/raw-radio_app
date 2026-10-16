@@ -25,11 +25,11 @@ const CARD_ICON_SIZE = 32 * CARD_SCALE // 64
 const CARD_PADDING_VERTICAL = 12 * CARD_SCALE // 24
 const CARD_PADDING_HORIZONTAL = 14 * CARD_SCALE // 28
 const CARD_GAP = 6 * CARD_SCALE // 12 (icon ↔ name, inside a card)
-// Hand-tuned, NOT `11 * CARD_SCALE`: the ×2 box felt right, but a ×2 label
-// (22px) overpowered the icon, so the name sits at 20px with a ~1.2 line-height
-// (24) — the weight / tracking / centring are unchanged.
-const CARD_NAME_FONT_SIZE = 20
-const CARD_NAME_LINE_HEIGHT = 24
+// Matched to the player's track title (18px) so the station name and the
+// now-playing line read as the same type scale — deliberately NOT `11 * CARD_SCALE`
+// (a ×2 label overpowered the icon). Line-height keeps the ~1.2 ratio.
+const CARD_NAME_FONT_SIZE = 18
+const CARD_NAME_LINE_HEIGHT = 22
 const CARD_LIST_GAP = 8 * CARD_SCALE // 16 (between cards)
 /**
  * The card is at least a square: `minHeight` is the row's target height, and
@@ -237,12 +237,17 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   container: {
-    // One row, full-bleed: no side padding, so the first/last card touch the
-    // content edge and the clamp scrolling reads correctly against it.
+    // One row with a 16px content inset to match the header / APK button. The
+    // inset is only visible at the two ends of the scroll: in the middle the
+    // cards scroll straight past the viewport edges, so the row still reads as
+    // full-bleed. This works with `attemptCenter` unchanged — the card `x` and
+    // the content width both come from THIS container, so the padding is folded
+    // into `centerX` and `contentWidth` alike and the clamp still lands the
+    // first/last card exactly 16px from the edge.
     flexDirection: 'row',
     alignItems: 'center',
     gap: CARD_LIST_GAP,
-    paddingHorizontal: 0,
+    paddingHorizontal: 16,
     paddingVertical: 8,
   },
   card: {
@@ -253,17 +258,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: CARD_PADDING_HORIZONTAL,
     borderWidth: SURFACE_BORDER_WIDTH,
     borderRadius: SURFACE_RADIUS,
-    // Translucent lift. Calibrated on the site for the old `#0d0d0d` surface;
-    // the app surface is now `--bg-secondary` `#1a1a1a`, one step lighter, so the
-    // overlay is bumped (0.03 → 0.05 / active 0.06 → 0.09) to keep the card
-    // reading as a raised surface above it instead of dissolving into the page.
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    // OPAQUE, not translucent. Android derives the elevation shadow's outline
+    // from the background drawable; a translucent fill makes it rasterise the
+    // shadow as an inset rectangle (uneven, worse on top) that only shows up on
+    // the active/pressed card. The value is the exact composite of the previous
+    // `rgba(255,255,255,0.05)` over the `#1a1a1a` (26) surface:
+    // 26 + 0.05 × 229 ≈ 37 → `#252525`. Same look, no artefact.
+    backgroundColor: '#252525',
     minWidth: CARD_MIN_SIZE,
     minHeight: CARD_MIN_SIZE,
     position: 'relative',
   },
   cardActive: {
-    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+    // Same reasoning as `card` above — the opaque composite of the previous
+    // `rgba(255,255,255,0.09)`: 26 + 0.09 × 229 ≈ 47 → `#2f2f2f`. `elevation: 6`
+    // (native) and the web `boxShadow` below are kept as-is.
+    backgroundColor: '#2f2f2f',
     // `.substation-card--active`:
     //   box-shadow: 0 0 20px rgba(0,0,0,.3), inset 0 0 15px rgba(255,255,255,.02)
     // Web: exact CSS string — the legacy props below would drop the `inset`
