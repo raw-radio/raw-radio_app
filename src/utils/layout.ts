@@ -65,6 +65,20 @@ export const FRAME_OUTER_BG = APP_SURFACE_BG
  */
 export const FRAME_OUTER_BG_FRAMED = '#080808'
 
+/**
+ * Shared corner radius for raised content surfaces — the CMS CTA banner, the
+ * station cards and the APK button. Centralised so the three read as the same
+ * geometry; individual components must NOT hard-code their own radius.
+ */
+export const SURFACE_RADIUS = 12
+
+/**
+ * Shared border width for those surfaces. Bumped to 2px (from the web's 1px
+ * hairline) because it is the only cue that separates a card from the surface
+ * on small screens; kept as one constant so CTA / cards / APK stay in step.
+ */
+export const SURFACE_BORDER_WIDTH = 2
+
 /** Card border — `border: 1px solid var(--raw-color-border-default, #333)`. */
 export const FRAME_BORDER_COLOR = '#333'
 

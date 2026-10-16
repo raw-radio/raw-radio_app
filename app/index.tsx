@@ -37,7 +37,11 @@ import { SubstationSelector } from '../src/components/SubstationSelector'
 import { PlayerBar } from '../src/components/PlayerBar'
 import { ChatSheet } from '../src/components/ChatSheet'
 import { ShareButton } from '../src/components/ShareButton'
-import { APP_SURFACE_BG } from '../src/utils/layout'
+import { APP_SURFACE_BG, SURFACE_BORDER_WIDTH, SURFACE_RADIUS } from '../src/utils/layout'
+
+/** Accent used by the outlined APK button (matches the CMS CTA in `ClientCtaBanner`). */
+const ACCENT = '#ff6b35'
+const ACCENT_BORDER = 'rgba(255, 107, 53, 0.6)'
 
 /** Connection dot colors, mirrored from `.connection-dot--*` in player.scss. */
 const DOT_CONNECTED = '#2bc96d'
@@ -314,6 +318,13 @@ export default function HomeScreen() {
 
       <VolumeSlider volume={volume} muted={muted} onChange={setVolume} onToggleMute={toggleMute} />
 
+      {/*
+        Flexible spacer: it pushes the station row and the APK affordance to
+        the bottom of the column, so the slack in a tall viewport sits between
+        the volume slider and the list instead of being split arbitrarily.
+      */}
+      <View style={styles.spacer} />
+
       <SubstationSelector
         substations={substations}
         currentSlug={currentSlug || 'main'}
@@ -321,27 +332,27 @@ export default function HomeScreen() {
       />
 
       {/*
-        Bottom-right affordance under the station list (which scrolls
-        internally), inset by the same 16px content edge as the rest of the
-        page so it never turns the page itself into a scroll container.
+        Bottom-right affordance under the station list, inset by the same 16px
+        content edge as the rest of the page so it never turns the page itself
+        into a scroll container.
 
-        Web: the existing `Скачать APK` link that opens the release asset in a
-        new tab. Android: `Обновить`, rendered ONLY while a newer sideloaded
-        build exists — on the current version (and until the check resolves)
-        this branch renders nothing at all.
+        Web: an outlined `Скачать APK` button (accent border + Android glyph)
+        that opens the release asset in a new tab. Android: an identically
+        styled `Обновить` button, rendered ONLY while a newer sideloaded build
+        exists — on the current version (and until the check resolves) this
+        branch renders nothing at all.
       */}
       {Platform.OS === 'web' ? (
         <View style={styles.downloadRow}>
           <TouchableOpacity
             onPress={handleDownloadAndroidApp}
-            style={styles.downloadLink}
-            activeOpacity={0.6}
-            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            style={styles.downloadButton}
+            activeOpacity={0.7}
             accessibilityRole="link"
             accessibilityLabel="Скачать APK"
           >
-            <Ionicons name="download-outline" size={15} color="#b3b3b3" />
-            <Text style={styles.downloadLinkText} allowFontScaling={false}>
+            <Ionicons name="logo-android" size={18} color={ACCENT} />
+            <Text style={styles.downloadButtonText} allowFontScaling={false}>
               Скачать APK
             </Text>
           </TouchableOpacity>
@@ -351,19 +362,18 @@ export default function HomeScreen() {
           <TouchableOpacity
             onPress={handleUpdateApp}
             disabled={updateBusy}
-            style={styles.downloadLink}
-            activeOpacity={0.6}
-            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            style={styles.downloadButton}
+            activeOpacity={0.7}
             accessibilityRole="link"
             accessibilityLabel="Обновить"
             accessibilityState={{ busy: updateBusy, disabled: updateBusy }}
           >
             {updateBusy ? (
-              <ActivityIndicator size="small" color="#b3b3b3" />
+              <ActivityIndicator size="small" color={ACCENT} />
             ) : (
-              <Ionicons name="download-outline" size={15} color="#b3b3b3" />
+              <Ionicons name="download-outline" size={18} color={ACCENT} />
             )}
-            <Text style={styles.downloadLinkText} allowFontScaling={false}>
+            <Text style={styles.downloadButtonText} allowFontScaling={false}>
               Обновить
             </Text>
           </TouchableOpacity>
@@ -390,6 +400,9 @@ const styles = StyleSheet.create({
   // `overflow: hidden` clips horizontally — a long now-playing title can never
   // widen the root and force horizontal scrolling.
   container: { flex: 1, backgroundColor: APP_SURFACE_BG, overflow: 'hidden' },
+  // Absorbs the free vertical space so the station row + APK button stick to the
+  // bottom (see the layout note in the JSX above).
+  spacer: { flex: 1 },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -433,28 +446,36 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  // Full-width row that only exists to hold the right-aligned APK link (web) /
+  // Full-width row that only exists to hold the right-aligned APK button (web) /
   // `Обновить` affordance (Android) and inset it by the same 16px content edge
   // as the header / player / list, so it lines up with the content's right edge
   // and never touches the screen edge. `width: '100%'` keeps it a stable flex
-  // child (its height does not depend on the link's intrinsic text width).
+  // child (its height does not depend on the button's intrinsic text width).
   downloadRow: {
     width: '100%',
     paddingHorizontal: 16,
     paddingTop: 4,
     alignItems: 'flex-end',
   },
-  // Plain text link — deliberately quieter than any button: no background, no
-  // border, no pill radius, no accent fill. Only the icon + label, muted grey.
-  // The touch target is widened with `hitSlop` (on the TouchableOpacity) instead
-  // of padding, so the text stays visually flush with the content right edge.
-  downloadLink: {
+  // Outlined APK button — transparent fill, accent border, hugging its content
+  // width. Shared surface geometry (radius/border) with the CTA banner and the
+  // station cards; the accent border + glyph carry the emphasis, not a fill, so
+  // it never competes with the play control.
+  downloadButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
+    minHeight: 44,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderWidth: SURFACE_BORDER_WIDTH,
+    borderColor: ACCENT_BORDER,
+    borderRadius: SURFACE_RADIUS,
+    backgroundColor: 'transparent',
   },
-  downloadLinkText: {
-    color: '#b3b3b3',
-    fontSize: 13,
+  downloadButtonText: {
+    color: ACCENT,
+    fontSize: 14,
+    fontWeight: '600',
   },
 })

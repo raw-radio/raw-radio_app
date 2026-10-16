@@ -9,7 +9,7 @@ import Animated, {
 } from 'react-native-reanimated'
 import { Ionicons } from '@expo/vector-icons'
 import { useReducedMotion } from '../hooks/useReducedMotion'
-import { APP_SURFACE_BG_RAISED } from '../utils/layout'
+import { APP_SURFACE_BG_RAISED, SURFACE_BORDER_WIDTH, SURFACE_RADIUS } from '../utils/layout'
 
 const ENTER_MS = 260
 const SLIDE_FROM = 10
@@ -92,9 +92,13 @@ const styles = StyleSheet.create({
     minHeight: 52,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    borderRadius: 16,
+    // Shared surface geometry (see `utils/layout`) — matches the station cards
+    // and the APK button. Only the radius changed (16 → 12) and the hairline
+    // was widened (1 → 2) to line up with the cards; the accent border, badge
+    // and text are untouched.
+    borderRadius: SURFACE_RADIUS,
     backgroundColor: APP_SURFACE_BG_RAISED,
-    borderWidth: 1,
+    borderWidth: SURFACE_BORDER_WIDTH,
     borderColor: ACCENT_BORDER,
   },
   cardPressed: {
